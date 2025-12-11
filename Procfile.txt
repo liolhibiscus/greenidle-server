@@ -1,0 +1,1 @@
+web: gunicorn greenidle_server:app
