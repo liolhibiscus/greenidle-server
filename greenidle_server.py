@@ -12,9 +12,6 @@ APP_NAME = "GreenIdle"
 # 🔐 Admin (dashboard / jobs) : seul toi
 ADMIN_TOKEN = "Iletait1fois@33"
 
-# 🔐 Client (anti-squattage) : toutes les machines doivent l’avoir
-CLIENT_TOKEN = "Azur_Green@28"
-
 DEBUG = False  # False sur Render
 
 
@@ -59,24 +56,11 @@ def require_admin():
     return request.args.get("token") == ADMIN_TOKEN
 
 
-def require_client():
-    # Accepte le token client en querystring (GET) ou dans le JSON (POST)
-    if request.method == "GET":
-        token = request.args.get("client_token")
-    else:
-        data = request.json or {}
-        token = data.get("client_token") or request.args.get("client_token")
-    return token == CLIENT_TOKEN
-
-
 # =========================
-#   API CLIENTS (PROTEGEES)
+#   API CLIENTS (OUVERTES)
 # =========================
 @app.route("/register", methods=["POST"])
 def register():
-    if not require_client():
-        return jsonify({"error": "unauthorized client"}), 403
-
     data = request.json or {}
     machine_id = data.get("machine_id")
     client_name = data.get("client_name")
@@ -91,9 +75,6 @@ def register():
 
 @app.route("/heartbeat", methods=["POST"])
 def heartbeat():
-    if not require_client():
-        return jsonify({"error": "unauthorized client"}), 403
-
     data = request.json or {}
     machine_id = data.get("machine_id")
     cpu = float(data.get("cpu_percent", 0.0))
@@ -109,9 +90,6 @@ def heartbeat():
 
 @app.route("/task", methods=["GET"])
 def get_task():
-    if not require_client():
-        return jsonify({"error": "unauthorized client"}), 403
-
     machine_id = request.args.get("machine_id")
     ensure_machine(machine_id)
 
@@ -142,9 +120,6 @@ def get_task():
 
 @app.route("/report", methods=["POST"])
 def report():
-    if not require_client():
-        return jsonify({"error": "unauthorized client"}), 403
-
     data = request.json or {}
     machine_id = data.get("machine_id")
     task_id = data.get("task_id")
@@ -217,10 +192,8 @@ def rename_machine(machine_id):
     if machine_id not in machines:
         return "Machine inconnue", 404
 
-    # Form HTML
     new_name = request.form.get("display_name")
     if not new_name:
-        # compat API JSON si besoin
         new_name = (request.json or {}).get("display_name")
 
     if not new_name:
@@ -408,7 +381,6 @@ def results_view():
 # =========================
 @app.route("/")
 def home():
-    # On n’expose pas le token automatiquement : tu passes par /dashboard?token=...
     return "GreenIdle server OK. Utilise /dashboard?token=... (admin).", 200
 
 
