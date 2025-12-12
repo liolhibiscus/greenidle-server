@@ -9,48 +9,23 @@ app = Flask(__name__)
 # =========================
 APP_NAME = "GreenIdle"
 
-# ⚠ A changer pour toi uniquement
+# 🔐 Admin (dashboard / jobs) : seul toi
 ADMIN_TOKEN = "Iletait1fois@33"
 
-DEBUG = False  # True en local, False sur Render
+# 🔐 Client (anti-squattage) : toutes les machines doivent l’avoir
+CLIENT_TOKEN = "GI_CLIENT_2025_!42"
+
+DEBUG = False  # False sur Render
 
 
 # =========================
 #   MINI BDD EN MEMOIRE
 # =========================
-# machines[machine_id] = {...}
-machines = {}
-
-# jobs[job_id] = {
-#   "job_id": ...,
-#   "name": ...,
-#   "description": ...,
-#   "task_type": "demo" ou "montecarlo",
-#   "total_chunks": int,
-#   "created_at": ...,
-#   "status": "pending"/"running"/"done",
-#   "total_seconds": int,
-# }
-jobs = {}
-
-# tasks[task_id] = {
-#   "task_id": ...,
-#   "job_id": ...,
-#   "task_type": ...,
-#   "size": int,
-#   "status": "pending"/"assigned"/"done",
-#   "assigned_to": machine_id ou None,
-#   "created_at": ...,
-#   "updated_at": ...,
-#   "seconds": int
-# }
-tasks = {}
-
-# results : liste de rapports de tâches (pour affichage)
-results = []  # {task_id, job_id, machine_id, seconds, timestamp}
-
-# log brut des reports
-tasks_log = []
+machines = {}   # machine_id -> dict
+jobs = {}       # job_id -> dict
+tasks = {}      # task_id -> dict
+results = []    # list[dict]
+tasks_log = []  # list[dict]
 
 
 # =========================
@@ -60,7 +35,7 @@ def now_iso():
     return datetime.utcnow().isoformat()
 
 
-def ensure_machine(machine_id, display_name=None, mode=None):
+def ensure_machine(machine_id, display_name=None):
     if not machine_id:
         return None
 
@@ -72,67 +47,72 @@ def ensure_machine(machine_id, display_name=None, mode=None):
             "last_seen": None,
             "total_seconds": 0,
             "last_cpu": 0.0,
-            "mode": mode or "normal",
-            "tags": []
         }
     else:
         if display_name:
             machines[machine_id]["display_name"] = display_name
-        if mode:
-            machines[machine_id]["mode"] = mode
 
     return machines[machine_id]
 
 
 def require_admin():
-    token = request.args.get("token")
-    if token != ADMIN_TOKEN:
-        return False
-    return True
+    return request.args.get("token") == ADMIN_TOKEN
+
+
+def require_client():
+    # Accepte le token client en querystring (GET) ou dans le JSON (POST)
+    if request.method == "GET":
+        token = request.args.get("client_token")
+    else:
+        data = request.json or {}
+        token = data.get("client_token") or request.args.get("client_token")
+    return token == CLIENT_TOKEN
 
 
 # =========================
-#   API CLIENTS
+#   API CLIENTS (PROTEGEES)
 # =========================
-
 @app.route("/register", methods=["POST"])
 def register():
+    if not require_client():
+        return jsonify({"error": "unauthorized client"}), 403
+
     data = request.json or {}
     machine_id = data.get("machine_id")
     client_name = data.get("client_name")
-    mode = data.get("mode")
 
     if not machine_id:
         return jsonify({"error": "machine_id manquant"}), 400
 
-    m = ensure_machine(machine_id, client_name, mode)
+    m = ensure_machine(machine_id, client_name)
     m["last_seen"] = now_iso()
-
-    print(f"[{APP_NAME}] REGISTER {machine_id} (name={m['display_name']}, mode={m['mode']})")
     return jsonify({"status": "ok", "message": "machine enregistree"})
 
 
 @app.route("/heartbeat", methods=["POST"])
 def heartbeat():
+    if not require_client():
+        return jsonify({"error": "unauthorized client"}), 403
+
     data = request.json or {}
     machine_id = data.get("machine_id")
-    client_name = data.get("client_name")
     cpu = float(data.get("cpu_percent", 0.0))
-    mode = data.get("mode")
 
     if not machine_id:
         return jsonify({"error": "machine_id manquant"}), 400
 
-    m = ensure_machine(machine_id, client_name, mode)
+    m = ensure_machine(machine_id)
     m["last_seen"] = now_iso()
     m["last_cpu"] = cpu
-
     return jsonify({"status": "ok"})
 
 
 @app.route("/task", methods=["GET"])
 def get_task():
-    machine_id = request.args.get("machine_id", "unknown")
+    if not require_client():
+        return jsonify({"error": "unauthorized client"}), 403
+
+    machine_id = request.args.get("machine_id")
     ensure_machine(machine_id)
 
     # 1) Cherche une tâche utilisateur en attente
@@ -141,18 +121,18 @@ def get_task():
             t["status"] = "assigned"
             t["assigned_to"] = machine_id
             t["updated_at"] = now_iso()
+
             job = jobs.get(t["job_id"])
             if job and job["status"] == "pending":
                 job["status"] = "running"
 
-            print(f"[{APP_NAME}] Assign task {t['task_id']} (job={t['job_id']}) to {machine_id}")
             return jsonify({
                 "task_id": t["task_id"],
                 "payload": t["task_type"],
                 "size": t["size"]
             })
 
-    # 2) Sinon, tâche démo par défaut
+    # 2) Sinon tâche démo
     return jsonify({
         "task_id": "demo-task",
         "payload": "demo",
@@ -162,6 +142,9 @@ def get_task():
 
 @app.route("/report", methods=["POST"])
 def report():
+    if not require_client():
+        return jsonify({"error": "unauthorized client"}), 403
+
     data = request.json or {}
     machine_id = data.get("machine_id")
     task_id = data.get("task_id")
@@ -181,7 +164,7 @@ def report():
         "reported_at": now_iso()
     })
 
-    # Si c'est une vraie tâche (pas juste demo-task)
+    # Si c'est une vraie tâche job
     if task_id in tasks:
         t = tasks[task_id]
         t["status"] = "done"
@@ -191,7 +174,7 @@ def report():
         job = jobs.get(t["job_id"])
         if job:
             job["total_seconds"] += seconds
-            # On vérifie si toutes les tâches de ce job sont finies
+            # Job terminé si toutes ses tasks sont done
             all_done = all(
                 (tt["status"] == "done")
                 for tt in tasks.values()
@@ -201,14 +184,13 @@ def report():
                 job["status"] = "done"
 
         results.append({
-            "task_id": task_id,
             "job_id": t["job_id"],
+            "task_id": task_id,
             "machine_id": machine_id,
             "seconds": seconds,
             "timestamp": now_iso()
         })
 
-    print(f"[{APP_NAME}] REPORT {machine_id} +{seconds}s (task={task_id})")
     return jsonify({"status": "ok"})
 
 
@@ -219,40 +201,35 @@ def status():
         "app": APP_NAME,
         "machines_count": len(machines),
         "total_hours": round(total_seconds / 3600, 4),
+        "jobs_count": len(jobs),
         "machines": list(machines.values()),
-        "jobs_count": len(jobs)
     })
 
 
 # =========================
-#   API / VUES ADMIN
+#   ADMIN: RENAME + JOBS
 # =========================
-
-@app.route("/machines", methods=["GET"])
-def list_machines():
-    if not require_admin():
-        return "Accès refusé (admin token)", 403
-    return jsonify({
-        "machines": list(machines.values()),
-        "count": len(machines)
-    })
-
-
 @app.route("/machines/<machine_id>/rename", methods=["POST"])
 def rename_machine(machine_id):
     if not require_admin():
         return "Accès refusé (admin token)", 403
 
     if machine_id not in machines:
-        return jsonify({"error": "machine inconnue"}), 404
+        return "Machine inconnue", 404
 
-    data = request.json or {}
-    new_name = data.get("display_name")
+    # Form HTML
+    new_name = request.form.get("display_name")
     if not new_name:
-        return jsonify({"error": "display_name manquant"}), 400
+        # compat API JSON si besoin
+        new_name = (request.json or {}).get("display_name")
+
+    if not new_name:
+        return "Nom manquant", 400
 
     machines[machine_id]["display_name"] = new_name
-    return jsonify({"status": "ok", "machine": machines[machine_id]})
+
+    token = request.args.get("token")
+    return redirect(url_for("dashboard", token=token))
 
 
 @app.route("/submit", methods=["GET", "POST"])
@@ -260,10 +237,12 @@ def submit_job():
     if not require_admin():
         return "Accès refusé (admin token)", 403
 
+    token = request.args.get("token")
+
     if request.method == "POST":
         name = request.form.get("name", "Job sans nom")
         description = request.form.get("description", "")
-        task_type = request.form.get("task_type", "demo")  # "demo" ou "montecarlo"
+        task_type = request.form.get("task_type", "demo")  # demo / montecarlo
         total_chunks = int(request.form.get("chunks", 10))
         size = int(request.form.get("size", 10000))
 
@@ -279,7 +258,6 @@ def submit_job():
             "total_seconds": 0
         }
 
-        # Création des tâches
         for i in range(total_chunks):
             task_id = f"{job_id}_part_{i+1}"
             tasks[task_id] = {
@@ -294,27 +272,27 @@ def submit_job():
                 "seconds": 0
             }
 
-        return redirect(url_for("jobs_view", token=request.args.get("token")))
+        return redirect(url_for("jobs_view", token=token))
 
     html = """
     <h1>Soumettre un job GreenIdle</h1>
     <form method="post">
         Nom du job :<br>
-        <input name="name" type="text" value="Simulation Monte Carlo"><br><br>
+        <input name="name" type="text" value="Simulation"><br><br>
 
         Description :<br>
         <textarea name="description" rows="3" cols="40"></textarea><br><br>
 
         Type de tâche :
         <select name="task_type">
-            <option value="demo">Démo (sec de calcul)</option>
+            <option value="demo">Démo</option>
             <option value="montecarlo">Monte Carlo</option>
         </select><br><br>
 
-        Nombre de morceaux (chunks) :<br>
+        Chunks :<br>
         <input name="chunks" type="number" value="10"><br><br>
 
-        Taille de chaque morceau (paramètre 'size') :<br>
+        Taille (size) :<br>
         <input name="size" type="number" value="10000"><br><br>
 
         <button type="submit">Créer le job</button>
@@ -322,7 +300,7 @@ def submit_job():
     <br>
     <a href="/dashboard?token={{ token }}">Retour dashboard</a>
     """
-    return render_template_string(html, token=request.args.get("token"))
+    return render_template_string(html, token=token)
 
 
 @app.route("/jobs")
@@ -330,6 +308,7 @@ def jobs_view():
     if not require_admin():
         return "Accès refusé (admin token)", 403
 
+    token = request.args.get("token")
     html = """
     <h1>Jobs GreenIdle</h1>
     <p><a href="/dashboard?token={{ token }}">Retour dashboard</a> |
@@ -338,14 +317,7 @@ def jobs_view():
     {% if jobs %}
     <table border="1" cellspacing="0" cellpadding="5">
         <tr>
-            <th>ID</th>
-            <th>Nom</th>
-            <th>Type</th>
-            <th>Status</th>
-            <th>Chunks</th>
-            <th>Secondes totales</th>
-            <th>Créé le</th>
-            <th>Détail</th>
+            <th>ID</th><th>Nom</th><th>Type</th><th>Status</th><th>Chunks</th><th>Secondes</th><th>Créé le</th><th>Détail</th>
         </tr>
         {% for j in jobs %}
         <tr>
@@ -361,14 +333,10 @@ def jobs_view():
         {% endfor %}
     </table>
     {% else %}
-    <p>Aucun job encore.</p>
+    <p>Aucun job.</p>
     {% endif %}
     """
-    return render_template_string(
-        html,
-        jobs=list(jobs.values()),
-        token=request.args.get("token")
-    )
+    return render_template_string(html, jobs=list(jobs.values()), token=token)
 
 
 @app.route("/jobs/<job_id>")
@@ -376,53 +344,34 @@ def job_detail(job_id):
     if not require_admin():
         return "Accès refusé (admin token)", 403
 
+    token = request.args.get("token")
     job = jobs.get(job_id)
     if not job:
-        return f"Job {job_id} introuvable", 404
+        return "Job introuvable", 404
 
     job_tasks = [t for t in tasks.values() if t["job_id"] == job_id]
 
     html = """
-    <h1>Détail job {{ job.job_id }}</h1>
-    <p><strong>Nom :</strong> {{ job.name }}</p>
-    <p><strong>Description :</strong> {{ job.description }}</p>
-    <p><strong>Type :</strong> {{ job.task_type }}</p>
-    <p><strong>Status :</strong> {{ job.status }}</p>
-    <p><strong>Secondes totales :</strong> {{ job.total_seconds }}</p>
-    <p><a href="/jobs?token={{ token }}">Retour jobs</a></p>
+    <h1>Job {{ job.job_id }}</h1>
+    <p><b>Nom:</b> {{ job.name }}</p>
+    <p><b>Status:</b> {{ job.status }}</p>
+    <p><b>Secondes:</b> {{ job.total_seconds }}</p>
+    <p><a href="/jobs?token={{ token }}">Retour</a></p>
 
     <h2>Tâches</h2>
-    {% if job_tasks %}
     <table border="1" cellspacing="0" cellpadding="5">
+      <tr><th>Task</th><th>Status</th><th>Assignée à</th><th>Secondes</th></tr>
+      {% for t in job_tasks %}
         <tr>
-            <th>Task ID</th>
-            <th>Status</th>
-            <th>Assignée à</th>
-            <th>Secondes</th>
-            <th>Créée</th>
-            <th>Maj</th>
+          <td>{{ t.task_id }}</td>
+          <td>{{ t.status }}</td>
+          <td>{{ t.assigned_to }}</td>
+          <td>{{ t.seconds }}</td>
         </tr>
-        {% for t in job_tasks %}
-        <tr>
-            <td>{{ t.task_id }}</td>
-            <td>{{ t.status }}</td>
-            <td>{{ t.assigned_to }}</td>
-            <td>{{ t.seconds }}</td>
-            <td>{{ t.created_at }}</td>
-            <td>{{ t.updated_at }}</td>
-        </tr>
-        {% endfor %}
+      {% endfor %}
     </table>
-    {% else %}
-    <p>Aucune tâche pour ce job.</p>
-    {% endif %}
     """
-    return render_template_string(
-        html,
-        job=job,
-        job_tasks=job_tasks,
-        token=request.args.get("token")
-    )
+    return render_template_string(html, job=job, job_tasks=job_tasks, token=token)
 
 
 @app.route("/results")
@@ -430,46 +379,37 @@ def results_view():
     if not require_admin():
         return "Accès refusé (admin token)", 403
 
+    token = request.args.get("token")
     html = """
-    <h1>Résultats des tâches</h1>
+    <h1>Résultats</h1>
     <p><a href="/dashboard?token={{ token }}">Retour dashboard</a></p>
     {% if rows %}
     <table border="1" cellspacing="0" cellpadding="5">
+      <tr><th>Job</th><th>Task</th><th>Machine</th><th>Secondes</th><th>Date</th></tr>
+      {% for r in rows %}
         <tr>
-            <th>Job</th>
-            <th>Task</th>
-            <th>Machine</th>
-            <th>Secondes</th>
-            <th>Date</th>
+          <td>{{ r.job_id }}</td>
+          <td>{{ r.task_id }}</td>
+          <td>{{ r.machine_id }}</td>
+          <td>{{ r.seconds }}</td>
+          <td>{{ r.timestamp }}</td>
         </tr>
-        {% for r in rows %}
-        <tr>
-            <td>{{ r.job_id }}</td>
-            <td>{{ r.task_id }}</td>
-            <td>{{ r.machine_id }}</td>
-            <td>{{ r.seconds }}</td>
-            <td>{{ r.timestamp }}</td>
-        </tr>
-        {% endfor %}
+      {% endfor %}
     </table>
     {% else %}
-    <p>Aucun résultat pour le moment.</p>
+    <p>Aucun résultat.</p>
     {% endif %}
     """
-    return render_template_string(
-        html,
-        rows=results,
-        token=request.args.get("token")
-    )
+    return render_template_string(html, rows=results, token=token)
 
 
 # =========================
-#   DASHBOARD
+#   DASHBOARD (ADMIN)
 # =========================
-
 @app.route("/")
 def home():
-    return redirect(url_for("dashboard"))
+    # On n’expose pas le token automatiquement : tu passes par /dashboard?token=...
+    return "GreenIdle server OK. Utilise /dashboard?token=... (admin).", 200
 
 
 @app.route("/dashboard")
@@ -477,6 +417,7 @@ def dashboard():
     if not require_admin():
         return "Accès refusé (admin token)", 403
 
+    token = request.args.get("token")
     total_seconds = sum(m["total_seconds"] for m in machines.values())
     total_hours = round(total_seconds / 3600, 4)
     machines_count = len(machines)
@@ -491,14 +432,13 @@ def dashboard():
             body { font-family: Arial, sans-serif; margin: 20px; }
             h1 { margin-bottom: 0.2em; }
             .stats { margin-bottom: 1em; }
-            table { border-collapse: collapse; width: 100%; max-width: 1000px; }
+            table { border-collapse: collapse; width: 100%; max-width: 1100px; }
             th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; }
             th { background: #f0f0f0; }
             tr:nth-child(even) { background: #fafafa; }
             .small { font-size: 0.9em; color: #666; }
-            h2 { margin-top: 1.5em; }
-            .mode-normal { color: #2c7; font-weight: bold; }
-            .mode-night { color: #07c; font-weight: bold; }
+            form { margin: 0; }
+            input[type=text]{ width: 180px; }
         </style>
     </head>
     <body>
@@ -508,9 +448,8 @@ def dashboard():
             <p><strong>Total d'heures de calcul :</strong> {{ total_hours }}</p>
             <p>
               <a href="/submit?token={{ token }}">Nouveau job</a> |
-              <a href="/jobs?token={{ token }}">Voir les jobs</a> |
-              <a href="/results?token={{ token }}">Résultats</a> |
-              <a href="/machines?token={{ token }}">API machines (JSON)</a>
+              <a href="/jobs?token={{ token }}">Jobs</a> |
+              <a href="/results?token={{ token }}">Résultats</a>
             </p>
         </div>
 
@@ -521,37 +460,36 @@ def dashboard():
                 <tr>
                     <th>ID interne</th>
                     <th>Nom affiché</th>
-                    <th>Mode</th>
-                    <th>CPU (dernier)</th>
+                    <th>CPU</th>
                     <th>Enregistrée le</th>
                     <th>Dernière activité</th>
-                    <th>Secondes totales</th>
+                    <th>Secondes</th>
                     <th>Heures</th>
+                    <th>Renommer</th>
                 </tr>
             </thead>
             <tbody>
                 {% for m in machines %}
                 <tr>
                     <td>{{ m.machine_id }}</td>
-                    <td>{{ m.display_name }}</td>
-                    <td class="small">
-                        {% if m.mode == 'night' %}
-                            <span class="mode-night">nuit</span>
-                        {% else %}
-                            <span class="mode-normal">normal</span>
-                        {% endif %}
-                    </td>
+                    <td><strong>{{ m.display_name }}</strong></td>
                     <td>{{ m.last_cpu }} %</td>
                     <td class="small">{{ m.registered_at }}</td>
                     <td class="small">{{ m.last_seen }}</td>
                     <td>{{ m.total_seconds }}</td>
                     <td>{{ (m.total_seconds / 3600) | round(4) }}</td>
+                    <td>
+                        <form method="post" action="/machines/{{ m.machine_id }}/rename?token={{ token }}" style="display:flex; gap:6px;">
+                            <input type="text" name="display_name" placeholder="Nouveau nom" required>
+                            <button type="submit">OK</button>
+                        </form>
+                    </td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
         {% else %}
-        <p>Aucune machine n'est encore connectée.</p>
+        <p>Aucune machine connectée.</p>
         {% endif %}
     </body>
     </html>
@@ -562,7 +500,7 @@ def dashboard():
         machines=list(machines.values()),
         machines_count=machines_count,
         total_hours=total_hours,
-        token=request.args.get("token")
+        token=token
     )
 
 
