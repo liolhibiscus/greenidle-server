@@ -13,7 +13,7 @@ APP_NAME = "GreenIdle"
 ADMIN_TOKEN = "Iletait1fois@33"
 
 # 🔐 Client (anti-squattage) : toutes les machines doivent l’avoir
-CLIENT_TOKEN = "GI_CLIENT_2025_!42"
+CLIENT_TOKEN = "Azur_Green@28"
 
 DEBUG = False  # False sur Render
 
