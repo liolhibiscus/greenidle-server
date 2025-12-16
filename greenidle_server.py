@@ -14,6 +14,16 @@ from flask import send_from_directory, abort
 
 app = Flask(__name__)
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PLUGINS_DIR = os.path.join(BASE_DIR, "server_plugins")
+
+@app.route("/plugins/<path:filename>")
+def serve_plugin(filename):
+    if ".." in filename or filename.startswith("/"):
+        abort(400)
+    return send_from_directory(PLUGINS_DIR, filename, as_attachment=False)
+
+
 # =========================
 #   CONFIG
 # =========================
