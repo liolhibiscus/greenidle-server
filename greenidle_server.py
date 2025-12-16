@@ -1,8 +1,9 @@
-print(">>> GREENIDLE_SERVER.PY LOADED – MIN-SEC V4 <<<")
+print(">>> GREENIDLE_SERVER.PY LOADED – MIN-SEC V5 <<<")
 
-
-
-from flask import Flask, request, jsonify, render_template_string, redirect, url_for, abort
+from flask import (
+    Flask, request, jsonify, render_template_string, redirect, url_for,
+    abort, send_from_directory
+)
 from datetime import datetime
 import uuid
 import os
@@ -10,11 +11,12 @@ import time
 import hmac
 import hashlib
 from functools import wraps
-import os
-from flask import send_from_directory, abort
 
 app = Flask(__name__)
 
+# =========================
+#   PLUGINS (server_plugins/)
+# =========================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PLUGINS_DIR = os.path.join(BASE_DIR, "server_plugins")
 
@@ -23,6 +25,7 @@ def serve_plugin(filename):
     if ".." in filename or filename.startswith("/"):
         abort(400)
     return send_from_directory(PLUGINS_DIR, filename, as_attachment=False)
+
 def file_sha256(path: str) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -31,9 +34,6 @@ def file_sha256(path: str) -> str:
     return h.hexdigest()
 
 def list_plugins():
-    """
-    Liste les plugins présents dans server_plugins/
-    """
     items = []
     try:
         if not os.path.isdir(PLUGINS_DIR):
@@ -58,10 +58,8 @@ def list_plugins():
 
 @app.route("/plugins.json")
 def plugins_json():
-    return jsonify({
-        "count": len(list_plugins()),
-        "plugins": list_plugins()
-    })
+    plugins = list_plugins()
+    return jsonify({"count": len(plugins), "plugins": plugins})
 
 @app.route("/plugins")
 def plugins_page():
@@ -92,7 +90,6 @@ def plugins_page():
     """
     return render_template_string(html, plugins=plugins)
 
-
 # =========================
 #   CONFIG
 # =========================
@@ -103,43 +100,37 @@ APP_NAME = "GreenIdle"
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 
 # Optionnel: blacklist IPs dans Render => BLACKLIST_IPS="1.2.3.4,5.6.7.8"
-BLACKLIST_IPS = set(
-    ip.strip() for ip in os.getenv("BLACKLIST_IPS", "").split(",") if ip.strip()
-)
+BLACKLIST_IPS = set(ip.strip() for ip in os.getenv("BLACKLIST_IPS", "").split(",") if ip.strip())
 
 DEBUG = False  # False sur Render
 
 # =========================
 #   MINI BDD EN MEMOIRE
-#   (Render redémarre => mémoire reset, OK pour "minimal")
+#   (Render redémarre => mémoire reset)
 # =========================
 machines = {}         # machine_id -> dict
 machine_configs = {}  # machine_id -> config dict
 jobs = {}             # job_id -> dict
 tasks = {}            # task_id -> dict
-results = []          # list[dict] results rows
-tasks_log = []        # list[dict] every report
+results = []          # list[dict]
+tasks_log = []        # list[dict]
 
 # Auth clients minimal (transition douce)
-clients = {}          # client_id -> {"machine_key": "...", "created_at": "..."}
-machine_to_client = {}  # machine_id -> client_id (si enregistré)
+clients = {}            # client_id -> {"machine_key": "...", "created_at": "..."}
+machine_to_client = {}  # machine_id -> client_id
 
 # =========================
-#   OUTILS
+#   UTILS
 # =========================
 def now_iso():
     return datetime.utcnow().isoformat()
 
 def get_ip():
-    # Render / proxy : X-Forwarded-For existe souvent
     fwd = request.headers.get("X-Forwarded-For", "")
     if fwd:
         return fwd.split(",")[0].strip()
     return request.remote_addr or "unknown"
 
-# -------------------------
-# Rate limit (léger, mémoire)
-# -------------------------
 _RATE = {}  # {key: [timestamps]}
 def rate_limit(key: str, limit=30, window=60):
     now = time.time()
@@ -151,19 +142,13 @@ def rate_limit(key: str, limit=30, window=60):
     _RATE[key] = lst
 
 def is_blacklisted():
-    ip = get_ip()
-    return ip in BLACKLIST_IPS
+    return get_ip() in BLACKLIST_IPS
 
-# -------------------------
-# Admin protection (UX friendly)
-# -------------------------
 def is_admin():
     if not ADMIN_TOKEN:
         return False
-    # 1) header (plus propre)
     if request.headers.get("X-Admin-Token", "") == ADMIN_TOKEN:
         return True
-    # 2) query param (compatible avec ton dashboard actuel)
     return request.args.get("token", "") == ADMIN_TOKEN
 
 def require_admin_route(f):
@@ -176,30 +161,23 @@ def require_admin_route(f):
 
 # -------------------------
 # Client auth minimal (HMAC)
-# Transition douce : si headers présents => vérif, sinon legacy autorisé (rate-limité)
+# Transition douce : si headers présents => vérif, sinon legacy accepté (rate-limité)
 # -------------------------
 def _hmac_hex(key: str, body_bytes: bytes) -> str:
     return hmac.new(key.encode("utf-8"), body_bytes, hashlib.sha256).hexdigest()
 
 def verify_client_if_present(machine_id: str = None):
-    """
-    Si le client envoie X-Client-Id + X-Client-Signature => on vérifie.
-    Sinon => legacy accepté (mais on rate-limit).
-    """
-    ip = get_ip()
     if is_blacklisted():
         abort(403)
 
     client_id = request.headers.get("X-Client-Id", "").strip()
     sig = request.headers.get("X-Client-Signature", "").strip()
 
-    # Si headers absents => mode legacy
     if not client_id and not sig:
-        # anti-squattage léger sur endpoints clients (legacy)
-        rate_limit(f"legacy:{ip}", limit=60, window=60)
+        # legacy
+        rate_limit(f"legacy:{get_ip()}", limit=60, window=60)
         return {"mode": "legacy", "client_id": None}
 
-    # Headers partiels => refuse
     if not client_id or not sig:
         abort(401)
 
@@ -207,15 +185,12 @@ def verify_client_if_present(machine_id: str = None):
     if not c:
         abort(401)
 
-    # signature sur le body brut (request.data) : même pour JSON
     expected = _hmac_hex(c["machine_key"], request.data or b"")
     if not hmac.compare_digest(expected, sig):
         abort(401)
 
-    # petit rate limit par client_id
     rate_limit(f"client:{client_id}", limit=120, window=60)
 
-    # mapping machine_id -> client_id si on l’a
     if machine_id:
         machine_to_client[machine_id] = client_id
 
@@ -268,12 +243,10 @@ def ensure_config(machine_id: str):
 # =========================
 @app.route("/register", methods=["POST"])
 def register():
-    ip = get_ip()
     if is_blacklisted():
         return jsonify({"error": "blacklisted"}), 403
 
-    # Limite inscriptions (léger) : 10/min par IP
-    rate_limit(f"register:{ip}", limit=10, window=60)
+    rate_limit(f"register:{get_ip()}", limit=10, window=60)
 
     data = request.json or {}
     machine_id = data.get("machine_id")
@@ -282,27 +255,19 @@ def register():
     if not machine_id:
         return jsonify({"error": "machine_id manquant"}), 400
 
-    # Si le client fournit déjà client_id + machine_key => on l'enregistre
     provided_client_id = (data.get("client_id") or "").strip()
     provided_machine_key = (data.get("machine_key") or "").strip()
 
     if provided_client_id and provided_machine_key:
-        clients[provided_client_id] = {
-            "machine_key": provided_machine_key,
-            "created_at": now_iso(),
-        }
+        clients[provided_client_id] = {"machine_key": provided_machine_key, "created_at": now_iso()}
         machine_to_client[machine_id] = provided_client_id
         auth_mode = "signed-ready"
         returned_client_id = provided_client_id
-        returned_machine_key = None  # on ne le renvoie pas si déjà fourni
+        returned_machine_key = None
     else:
-        # Mode transition : on génère un couple et on le renvoie
         generated_client_id = str(uuid.uuid4())
         generated_machine_key = str(uuid.uuid4()) + str(uuid.uuid4())
-        clients[generated_client_id] = {
-            "machine_key": generated_machine_key,
-            "created_at": now_iso(),
-        }
+        clients[generated_client_id] = {"machine_key": generated_machine_key, "created_at": now_iso()}
         machine_to_client[machine_id] = generated_client_id
         auth_mode = "generated"
         returned_client_id = generated_client_id
@@ -318,7 +283,6 @@ def register():
         "auth": {
             "mode": auth_mode,
             "client_id": returned_client_id,
-            # renvoyé seulement si généré (à stocker côté client)
             "machine_key": returned_machine_key,
             "how_to_sign": "HMAC_SHA256(machine_key, raw_request_body) -> X-Client-Signature",
             "headers": ["X-Client-Id", "X-Client-Signature"]
@@ -349,10 +313,8 @@ def get_config():
         return jsonify({"error": "machine_id manquant"}), 400
 
     verify_client_if_present(machine_id)
-
     ensure_machine(machine_id)
-    cfg = ensure_config(machine_id)
-    return jsonify(cfg)
+    return jsonify(ensure_config(machine_id))
 
 @app.route("/task", methods=["GET"])
 def get_task():
@@ -365,11 +327,9 @@ def get_task():
     ensure_machine(machine_id)
     cfg = ensure_config(machine_id)
 
-    # Si machine stoppée via dashboard => on ne donne pas de tâche
     if not cfg.get("enabled", True):
         return ("", 204)
 
-    # 1) assign pending tasks
     for t in tasks.values():
         if t["status"] == "pending":
             t["status"] = "assigned"
@@ -382,14 +342,13 @@ def get_task():
 
             return jsonify({
                 "task_id": t["task_id"],
-                "payload": t["task_type"],      # plugin name
+                "payload": t["task_type"],
                 "params": t.get("params", {}),
                 "size": t.get("size", 0),
                 "task_max_seconds": cfg.get("task_max_seconds", 30),
                 "post_task_sleep_seconds": cfg.get("post_task_sleep_seconds", 2),
             })
 
-    # 2) no task -> 204 (client sleeps)
     return ("", 204)
 
 @app.route("/report", methods=["POST"])
@@ -459,7 +418,6 @@ def report():
 
 @app.route("/status", methods=["GET"])
 def status():
-    # Public endpoint (tu peux le laisser public)
     total_seconds = sum(m["total_seconds"] for m in machines.values())
     return jsonify({
         "app": APP_NAME,
@@ -526,7 +484,7 @@ def start_machine(machine_id):
     return redirect(url_for("dashboard", token=request.args.get("token")))
 
 # =========================
-#   JOBS (ADMIN)
+#   JOBS (ADMIN) — MONTECARLO UNIQUEMENT
 # =========================
 @app.route("/submit", methods=["GET", "POST"])
 @require_admin_route
@@ -536,7 +494,7 @@ def submit_job():
     if request.method == "POST":
         name = request.form.get("name", "Job sans nom")
         description = request.form.get("description", "")
-        task_type = request.form.get("task_type", "montecarlo_pi")
+        task_type = "montecarlo"  # verrouillé
         total_chunks = int(request.form.get("chunks", 5))
         size = int(request.form.get("size", 200000))
 
@@ -554,10 +512,7 @@ def submit_job():
 
         for i in range(total_chunks):
             task_id = f"{job_id}_part_{i+1}"
-            params = {}
-
-            if task_type in ("montecarlo_pi", "montecarlo"):
-                params = {"n": size, "seed": i + 1}
+            params = {"n": size, "seed": i + 1}
 
             tasks[task_id] = {
                 "task_id": task_id,
@@ -586,11 +541,7 @@ def submit_job():
         Description :<br>
         <textarea name="description" rows="3" cols="60">Test calcul distribué</textarea><br><br>
 
-        Type de tâche :
-        <select name="task_type">
-            <option value="montecarlo_pi">Plugin: montecarlo_pi</option>
-            <option value="montecarlo">Plugin: montecarlo</option>
-        </select><br><br>
+        Type de tâche : <b>montecarlo</b> (unique)<br><br>
 
         Chunks :<br>
         <input name="chunks" type="number" value="5" min="1" max="200"><br><br>
@@ -642,8 +593,7 @@ def aggregate_job_result(job_id: str):
     job = jobs.get(job_id)
     if not job:
         return None
-
-    if job.get("task_type") not in ("montecarlo_pi", "montecarlo"):
+    if job.get("task_type") != "montecarlo":
         return None
 
     inside_sum = 0
@@ -760,7 +710,7 @@ def dashboard():
     </head>
     <body>
 
-    <h2 style="color:red;">DASHBOARD V2 – CONFIG + JOBS (FINAL + MIN-SEC)</h2>
+    <h2 style="color:red;">DASHBOARD V2 – CONFIG + JOBS (MIN-SEC)</h2>
 
     <h1>{{ app_name }} – Tableau de bord</h1>
     <p>
