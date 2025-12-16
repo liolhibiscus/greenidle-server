@@ -1,4 +1,5 @@
-print(">>> GREENIDLE_SERVER.PY LOADED – DASHBOARD V2 + JOBS (FINAL + MIN-SEC) <<<")
+print(">>> GREENIDLE_SERVER.PY LOADED – MIN-SEC V3 <<<")
+
 
 from flask import Flask, request, jsonify, render_template_string, redirect, url_for, abort
 from datetime import datetime
