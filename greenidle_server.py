@@ -1,8 +1,13 @@
-print(">>> GREENIDLE_SERVER.PY LOADED – DASHBOARD V2 + JOBS (FINAL) <<<")
+print(">>> GREENIDLE_SERVER.PY LOADED – DASHBOARD V2 + JOBS (FINAL + MIN-SEC) <<<")
 
-from flask import Flask, request, jsonify, render_template_string, redirect, url_for
+from flask import Flask, request, jsonify, render_template_string, redirect, url_for, abort
 from datetime import datetime
 import uuid
+import os
+import time
+import hmac
+import hashlib
+from functools import wraps
 
 app = Flask(__name__)
 
@@ -10,11 +15,21 @@ app = Flask(__name__)
 #   CONFIG
 # =========================
 APP_NAME = "GreenIdle"
-ADMIN_TOKEN = "Iletait1fois@33"
+
+# IMPORTANT: NE JAMAIS METTRE LE TOKEN EN DUR.
+# Sur Render => Environment => ADMIN_TOKEN
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+
+# Optionnel: blacklist IPs dans Render => BLACKLIST_IPS="1.2.3.4,5.6.7.8"
+BLACKLIST_IPS = set(
+    ip.strip() for ip in os.getenv("BLACKLIST_IPS", "").split(",") if ip.strip()
+)
+
 DEBUG = False  # False sur Render
 
 # =========================
 #   MINI BDD EN MEMOIRE
+#   (Render redémarre => mémoire reset, OK pour "minimal")
 # =========================
 machines = {}         # machine_id -> dict
 machine_configs = {}  # machine_id -> config dict
@@ -23,14 +38,106 @@ tasks = {}            # task_id -> dict
 results = []          # list[dict] results rows
 tasks_log = []        # list[dict] every report
 
+# Auth clients minimal (transition douce)
+clients = {}          # client_id -> {"machine_key": "...", "created_at": "..."}
+machine_to_client = {}  # machine_id -> client_id (si enregistré)
+
 # =========================
 #   OUTILS
 # =========================
 def now_iso():
     return datetime.utcnow().isoformat()
 
-def require_admin():
-    return request.args.get("token") == ADMIN_TOKEN
+def get_ip():
+    # Render / proxy : X-Forwarded-For existe souvent
+    fwd = request.headers.get("X-Forwarded-For", "")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.remote_addr or "unknown"
+
+# -------------------------
+# Rate limit (léger, mémoire)
+# -------------------------
+_RATE = {}  # {key: [timestamps]}
+def rate_limit(key: str, limit=30, window=60):
+    now = time.time()
+    lst = _RATE.get(key, [])
+    lst = [t for t in lst if now - t < window]
+    if len(lst) >= limit:
+        abort(429)
+    lst.append(now)
+    _RATE[key] = lst
+
+def is_blacklisted():
+    ip = get_ip()
+    return ip in BLACKLIST_IPS
+
+# -------------------------
+# Admin protection (UX friendly)
+# -------------------------
+def is_admin():
+    if not ADMIN_TOKEN:
+        return False
+    # 1) header (plus propre)
+    if request.headers.get("X-Admin-Token", "") == ADMIN_TOKEN:
+        return True
+    # 2) query param (compatible avec ton dashboard actuel)
+    return request.args.get("token", "") == ADMIN_TOKEN
+
+def require_admin_route(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not is_admin():
+            return "Accès refusé", 403
+        return f(*args, **kwargs)
+    return wrapper
+
+# -------------------------
+# Client auth minimal (HMAC)
+# Transition douce : si headers présents => vérif, sinon legacy autorisé (rate-limité)
+# -------------------------
+def _hmac_hex(key: str, body_bytes: bytes) -> str:
+    return hmac.new(key.encode("utf-8"), body_bytes, hashlib.sha256).hexdigest()
+
+def verify_client_if_present(machine_id: str = None):
+    """
+    Si le client envoie X-Client-Id + X-Client-Signature => on vérifie.
+    Sinon => legacy accepté (mais on rate-limit).
+    """
+    ip = get_ip()
+    if is_blacklisted():
+        abort(403)
+
+    client_id = request.headers.get("X-Client-Id", "").strip()
+    sig = request.headers.get("X-Client-Signature", "").strip()
+
+    # Si headers absents => mode legacy
+    if not client_id and not sig:
+        # anti-squattage léger sur endpoints clients (legacy)
+        rate_limit(f"legacy:{ip}", limit=60, window=60)
+        return {"mode": "legacy", "client_id": None}
+
+    # Headers partiels => refuse
+    if not client_id or not sig:
+        abort(401)
+
+    c = clients.get(client_id)
+    if not c:
+        abort(401)
+
+    # signature sur le body brut (request.data) : même pour JSON
+    expected = _hmac_hex(c["machine_key"], request.data or b"")
+    if not hmac.compare_digest(expected, sig):
+        abort(401)
+
+    # petit rate limit par client_id
+    rate_limit(f"client:{client_id}", limit=120, window=60)
+
+    # mapping machine_id -> client_id si on l’a
+    if machine_id:
+        machine_to_client[machine_id] = client_id
+
+    return {"mode": "signed", "client_id": client_id}
 
 def ensure_machine(machine_id, display_name=None):
     if not machine_id:
@@ -79,6 +186,13 @@ def ensure_config(machine_id: str):
 # =========================
 @app.route("/register", methods=["POST"])
 def register():
+    ip = get_ip()
+    if is_blacklisted():
+        return jsonify({"error": "blacklisted"}), 403
+
+    # Limite inscriptions (léger) : 10/min par IP
+    rate_limit(f"register:{ip}", limit=10, window=60)
+
     data = request.json or {}
     machine_id = data.get("machine_id")
     client_name = data.get("client_name")
@@ -86,10 +200,48 @@ def register():
     if not machine_id:
         return jsonify({"error": "machine_id manquant"}), 400
 
+    # Si le client fournit déjà client_id + machine_key => on l'enregistre
+    provided_client_id = (data.get("client_id") or "").strip()
+    provided_machine_key = (data.get("machine_key") or "").strip()
+
+    if provided_client_id and provided_machine_key:
+        clients[provided_client_id] = {
+            "machine_key": provided_machine_key,
+            "created_at": now_iso(),
+        }
+        machine_to_client[machine_id] = provided_client_id
+        auth_mode = "signed-ready"
+        returned_client_id = provided_client_id
+        returned_machine_key = None  # on ne le renvoie pas si déjà fourni
+    else:
+        # Mode transition : on génère un couple et on le renvoie
+        generated_client_id = str(uuid.uuid4())
+        generated_machine_key = str(uuid.uuid4()) + str(uuid.uuid4())
+        clients[generated_client_id] = {
+            "machine_key": generated_machine_key,
+            "created_at": now_iso(),
+        }
+        machine_to_client[machine_id] = generated_client_id
+        auth_mode = "generated"
+        returned_client_id = generated_client_id
+        returned_machine_key = generated_machine_key
+
     m = ensure_machine(machine_id, client_name)
     m["last_seen"] = now_iso()
     ensure_config(machine_id)
-    return jsonify({"status": "ok", "message": "machine enregistree"})
+
+    return jsonify({
+        "status": "ok",
+        "message": "machine enregistree",
+        "auth": {
+            "mode": auth_mode,
+            "client_id": returned_client_id,
+            # renvoyé seulement si généré (à stocker côté client)
+            "machine_key": returned_machine_key,
+            "how_to_sign": "HMAC_SHA256(machine_key, raw_request_body) -> X-Client-Signature",
+            "headers": ["X-Client-Id", "X-Client-Signature"]
+        }
+    })
 
 @app.route("/heartbeat", methods=["POST"])
 def heartbeat():
@@ -100,6 +252,8 @@ def heartbeat():
     if not machine_id:
         return jsonify({"error": "machine_id manquant"}), 400
 
+    verify_client_if_present(machine_id)
+
     m = ensure_machine(machine_id)
     m["last_seen"] = now_iso()
     m["last_cpu"] = cpu
@@ -109,6 +263,11 @@ def heartbeat():
 @app.route("/config", methods=["GET"])
 def get_config():
     machine_id = request.args.get("machine_id")
+    if not machine_id:
+        return jsonify({"error": "machine_id manquant"}), 400
+
+    verify_client_if_present(machine_id)
+
     ensure_machine(machine_id)
     cfg = ensure_config(machine_id)
     return jsonify(cfg)
@@ -116,6 +275,11 @@ def get_config():
 @app.route("/task", methods=["GET"])
 def get_task():
     machine_id = request.args.get("machine_id")
+    if not machine_id:
+        return ("", 400)
+
+    verify_client_if_present(machine_id)
+
     ensure_machine(machine_id)
     cfg = ensure_config(machine_id)
 
@@ -139,7 +303,6 @@ def get_task():
                 "payload": t["task_type"],      # plugin name
                 "params": t.get("params", {}),
                 "size": t.get("size", 0),
-                # on renvoie aussi quelques paramètres serveur (optionnel côté client)
                 "task_max_seconds": cfg.get("task_max_seconds", 30),
                 "post_task_sleep_seconds": cfg.get("post_task_sleep_seconds", 2),
             })
@@ -158,12 +321,13 @@ def report():
     if not machine_id or task_id is None:
         return jsonify({"error": "machine_id ou task_id manquant"}), 400
 
+    verify_client_if_present(machine_id)
+
     m = ensure_machine(machine_id)
     m["total_seconds"] += seconds
     m["last_seen"] = now_iso()
     ensure_config(machine_id)
 
-    # log brut (debug/traçabilité)
     tasks_log.append({
         "machine_id": machine_id,
         "task_id": task_id,
@@ -172,7 +336,6 @@ def report():
         "reported_at": now_iso()
     })
 
-    # Si la tâche appartient à un job (vraie task)
     if task_id in tasks:
         t = tasks[task_id]
         t["status"] = "done"
@@ -192,7 +355,6 @@ def report():
             if all_done:
                 job["status"] = "done"
 
-            # Un seul enregistrement résultat (lié au job)
             results.append({
                 "job_id": job["job_id"],
                 "task_id": task_id,
@@ -202,7 +364,6 @@ def report():
                 "result": result
             })
     else:
-        # Rapport générique (demo ou autre)
         results.append({
             "job_id": None,
             "task_id": task_id,
@@ -216,6 +377,7 @@ def report():
 
 @app.route("/status", methods=["GET"])
 def status():
+    # Public endpoint (tu peux le laisser public)
     total_seconds = sum(m["total_seconds"] for m in machines.values())
     return jsonify({
         "app": APP_NAME,
@@ -229,10 +391,8 @@ def status():
 #   ADMIN: RENAME + CONFIG + STOP/START
 # =========================
 @app.route("/machines/<machine_id>/rename", methods=["POST"])
+@require_admin_route
 def rename_machine(machine_id):
-    if not require_admin():
-        return "Accès refusé", 403
-
     if machine_id not in machines:
         return "Machine inconnue", 404
 
@@ -244,17 +404,13 @@ def rename_machine(machine_id):
     return redirect(url_for("dashboard", token=request.args.get("token")))
 
 @app.route("/machines/<machine_id>/config", methods=["POST"])
+@require_admin_route
 def set_machine_config(machine_id):
-    if not require_admin():
-        return "Accès refusé", 403
-
     ensure_machine(machine_id)
     cfg = ensure_config(machine_id)
     data = request.form or request.json or {}
 
-    # checkbox HTML: présent => True, absent => False
     cfg["enabled"] = "enabled" in data
-
     cfg["cpu_pause_threshold"] = float(data.get("cpu_pause_threshold", cfg["cpu_pause_threshold"]))
     cfg["task_max_seconds"] = int(data.get("task_max_seconds", cfg["task_max_seconds"]))
     cfg["post_task_sleep_seconds"] = int(data.get("post_task_sleep_seconds", cfg["post_task_sleep_seconds"]))
@@ -270,10 +426,8 @@ def set_machine_config(machine_id):
     return redirect(url_for("dashboard", token=request.args.get("token")))
 
 @app.route("/machines/<machine_id>/stop", methods=["POST"])
+@require_admin_route
 def stop_machine(machine_id):
-    if not require_admin():
-        return "Accès refusé", 403
-
     ensure_machine(machine_id)
     cfg = ensure_config(machine_id)
     cfg["enabled"] = False
@@ -281,10 +435,8 @@ def stop_machine(machine_id):
     return redirect(url_for("dashboard", token=request.args.get("token")))
 
 @app.route("/machines/<machine_id>/start", methods=["POST"])
+@require_admin_route
 def start_machine(machine_id):
-    if not require_admin():
-        return "Accès refusé", 403
-
     ensure_machine(machine_id)
     cfg = ensure_config(machine_id)
     cfg["enabled"] = True
@@ -295,10 +447,8 @@ def start_machine(machine_id):
 #   JOBS (ADMIN)
 # =========================
 @app.route("/submit", methods=["GET", "POST"])
+@require_admin_route
 def submit_job():
-    if not require_admin():
-        return "Accès refusé (admin token)", 403
-
     token = request.args.get("token")
 
     if request.method == "POST":
@@ -324,7 +474,6 @@ def submit_job():
             task_id = f"{job_id}_part_{i+1}"
             params = {}
 
-            # plugins MonteCarlo attendent n + seed
             if task_type in ("montecarlo_pi", "montecarlo"):
                 params = {"n": size, "seed": i + 1}
 
@@ -373,10 +522,8 @@ def submit_job():
     return render_template_string(html, token=token)
 
 @app.route("/jobs")
+@require_admin_route
 def jobs_view():
-    if not require_admin():
-        return "Accès refusé (admin token)", 403
-
     token = request.args.get("token")
     html = """
     <h1>Jobs GreenIdle</h1>
@@ -432,10 +579,8 @@ def aggregate_job_result(job_id: str):
     return {"pi": pi_est, "inside": inside_sum, "total": total_sum}
 
 @app.route("/jobs/<job_id>")
+@require_admin_route
 def job_detail(job_id):
-    if not require_admin():
-        return "Accès refusé (admin token)", 403
-
     token = request.args.get("token")
     job = jobs.get(job_id)
     if not job:
@@ -476,10 +621,8 @@ def job_detail(job_id):
     return render_template_string(html, job=job, job_tasks=job_tasks, token=token, agg=agg)
 
 @app.route("/results")
+@require_admin_route
 def results_view():
-    if not require_admin():
-        return "Accès refusé (admin token)", 403
-
     token = request.args.get("token")
     html = """
     <h1>Résultats</h1>
@@ -509,10 +652,8 @@ def results_view():
 #   DASHBOARD (ADMIN)
 # =========================
 @app.route("/dashboard")
+@require_admin_route
 def dashboard():
-    if not require_admin():
-        return "Accès refusé", 403
-
     token = request.args.get("token")
     total_seconds = sum(m["total_seconds"] for m in machines.values())
     total_hours = round(total_seconds / 3600, 4)
@@ -537,7 +678,7 @@ def dashboard():
     </head>
     <body>
 
-    <h2 style="color:red;">DASHBOARD V2 – CONFIG + JOBS (FINAL)</h2>
+    <h2 style="color:red;">DASHBOARD V2 – CONFIG + JOBS (FINAL + MIN-SEC)</h2>
 
     <h1>{{ app_name }} – Tableau de bord</h1>
     <p>
