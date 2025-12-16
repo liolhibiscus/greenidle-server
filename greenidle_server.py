@@ -23,6 +23,74 @@ def serve_plugin(filename):
     if ".." in filename or filename.startswith("/"):
         abort(400)
     return send_from_directory(PLUGINS_DIR, filename, as_attachment=False)
+def file_sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def list_plugins():
+    """
+    Liste les plugins présents dans server_plugins/
+    """
+    items = []
+    try:
+        if not os.path.isdir(PLUGINS_DIR):
+            return items
+
+        for name in sorted(os.listdir(PLUGINS_DIR)):
+            if not name.endswith(".py"):
+                continue
+            full = os.path.join(PLUGINS_DIR, name)
+            if not os.path.isfile(full):
+                continue
+
+            items.append({
+                "name": name,
+                "bytes": os.path.getsize(full),
+                "sha256": file_sha256(full),
+                "url": f"/plugins/{name}"
+            })
+    except Exception:
+        pass
+    return items
+
+@app.route("/plugins.json")
+def plugins_json():
+    return jsonify({
+        "count": len(list_plugins()),
+        "plugins": list_plugins()
+    })
+
+@app.route("/plugins")
+def plugins_page():
+    plugins = list_plugins()
+    html = """
+    <h1>GreenIdle - Plugins disponibles</h1>
+    <p>Nombre: <b>{{ plugins|length }}</b></p>
+
+    {% if plugins %}
+      <table border="1" cellspacing="0" cellpadding="6">
+        <tr><th>Nom</th><th>Taille</th><th>SHA256</th><th>Lien</th></tr>
+        {% for p in plugins %}
+          <tr>
+            <td><b>{{ p.name }}</b></td>
+            <td>{{ p.bytes }} bytes</td>
+            <td style="font-family: monospace; font-size: 0.9em;">{{ p.sha256 }}</td>
+            <td><a href="{{ p.url }}" target="_blank">Ouvrir</a></td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% else %}
+      <p>Aucun plugin trouvé dans <code>server_plugins/</code>.</p>
+    {% endif %}
+
+    <p style="margin-top:16px;">
+      JSON: <a href="/plugins.json" target="_blank">/plugins.json</a>
+    </p>
+    """
+    return render_template_string(html, plugins=plugins)
 
 
 # =========================
