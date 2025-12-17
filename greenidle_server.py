@@ -1,4 +1,4 @@
-print(">>> GREENIDLE_SERVER.PY LOADED – MIN-SEC V5 <<<")
+print(">>> GREENIDLE_SERVER.PY LOADED – MIN-SEC V5 (AUTO-PLUGINS) <<<")
 
 from flask import (
     Flask, request, jsonify, render_template_string, redirect, url_for,
@@ -22,7 +22,8 @@ PLUGINS_DIR = os.path.join(BASE_DIR, "server_plugins")
 
 @app.route("/plugins/<path:filename>")
 def serve_plugin(filename):
-    if ".." in filename or filename.startswith("/"):
+    # anti path traversal minimal
+    if ".." in filename or filename.startswith(("/", "\\")) or ":" in filename:
         abort(400)
     return send_from_directory(PLUGINS_DIR, filename, as_attachment=False)
 
@@ -94,19 +95,12 @@ def plugins_page():
 #   CONFIG
 # =========================
 APP_NAME = "GreenIdle"
-
-# IMPORTANT: NE JAMAIS METTRE LE TOKEN EN DUR.
-# Sur Render => Environment => ADMIN_TOKEN
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
-
-# Optionnel: blacklist IPs dans Render => BLACKLIST_IPS="1.2.3.4,5.6.7.8"
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")  # Render env
 BLACKLIST_IPS = set(ip.strip() for ip in os.getenv("BLACKLIST_IPS", "").split(",") if ip.strip())
-
 DEBUG = False  # False sur Render
 
 # =========================
 #   MINI BDD EN MEMOIRE
-#   (Render redémarre => mémoire reset)
 # =========================
 machines = {}         # machine_id -> dict
 machine_configs = {}  # machine_id -> config dict
@@ -115,7 +109,7 @@ tasks = {}            # task_id -> dict
 results = []          # list[dict]
 tasks_log = []        # list[dict]
 
-# Auth clients minimal (transition douce)
+# Auth clients minimal
 clients = {}            # client_id -> {"machine_key": "...", "created_at": "..."}
 machine_to_client = {}  # machine_id -> client_id
 
@@ -159,10 +153,9 @@ def require_admin_route(f):
         return f(*args, **kwargs)
     return wrapper
 
-# -------------------------
-# Client auth minimal (HMAC)
-# Transition douce : si headers présents => vérif, sinon legacy accepté (rate-limité)
-# -------------------------
+# =========================
+#   Client auth minimal (HMAC)
+# =========================
 def _hmac_hex(key: str, body_bytes: bytes) -> str:
     return hmac.new(key.encode("utf-8"), body_bytes, hashlib.sha256).hexdigest()
 
@@ -173,9 +166,9 @@ def verify_client_if_present(machine_id: str = None):
     client_id = request.headers.get("X-Client-Id", "").strip()
     sig = request.headers.get("X-Client-Signature", "").strip()
 
+    # legacy (non signé) accepté mais rate limité
     if not client_id and not sig:
-        # legacy
-        rate_limit(f"legacy:{get_ip()}", limit=60, window=60)
+        rate_limit(f"legacy:{get_ip()}", limit=120, window=60)
         return {"mode": "legacy", "client_id": None}
 
     if not client_id or not sig:
@@ -189,7 +182,7 @@ def verify_client_if_present(machine_id: str = None):
     if not hmac.compare_digest(expected, sig):
         abort(401)
 
-    rate_limit(f"client:{client_id}", limit=120, window=60)
+    rate_limit(f"client:{client_id}", limit=240, window=60)
 
     if machine_id:
         machine_to_client[machine_id] = client_id
@@ -223,6 +216,10 @@ def default_config():
         "idle_sleep_seconds": 2,
         "task_max_seconds": 30,
         "post_task_sleep_seconds": 2,
+
+        # ✅ NOUVEAU : plugins requis (auto-download côté client)
+        "plugins_required": ["montecarlo"],
+
         "night_mode": {
             "enabled": False,
             "start_hour": 23,
@@ -236,6 +233,11 @@ def ensure_config(machine_id: str):
     if not cfg:
         cfg = default_config()
         machine_configs[machine_id] = cfg
+
+    # sécurité : s'assurer que la clé existe toujours
+    if "plugins_required" not in cfg or not isinstance(cfg.get("plugins_required"), list):
+        cfg["plugins_required"] = ["montecarlo"]
+
     return cfg
 
 # =========================
@@ -448,18 +450,34 @@ def rename_machine(machine_id):
 def set_machine_config(machine_id):
     ensure_machine(machine_id)
     cfg = ensure_config(machine_id)
+
     data = request.form or request.json or {}
 
-    cfg["enabled"] = "enabled" in data
-    cfg["cpu_pause_threshold"] = float(data.get("cpu_pause_threshold", cfg["cpu_pause_threshold"]))
-    cfg["task_max_seconds"] = int(data.get("task_max_seconds", cfg["task_max_seconds"]))
-    cfg["post_task_sleep_seconds"] = int(data.get("post_task_sleep_seconds", cfg["post_task_sleep_seconds"]))
+    # enabled : checkbox HTML -> présent = True, absent = False
+    if request.form is not None and request.form != {}:
+        cfg["enabled"] = ("enabled" in data)
+    else:
+        # si JSON (API) : true/false direct
+        if "enabled" in data:
+            cfg["enabled"] = bool(data.get("enabled"))
 
+    cfg["cpu_pause_threshold"] = float(data.get("cpu_pause_threshold", cfg.get("cpu_pause_threshold", 50.0)))
+    cfg["task_max_seconds"] = int(data.get("task_max_seconds", cfg.get("task_max_seconds", 30)))
+    cfg["post_task_sleep_seconds"] = int(data.get("post_task_sleep_seconds", cfg.get("post_task_sleep_seconds", 2)))
+
+    # ✅ NOUVEAU : plugins requis (string "a,b,c" depuis dashboard)
+    raw = (data.get("plugins_required", "") or "").strip()
+    if raw:
+        cfg["plugins_required"] = [p.strip() for p in raw.split(",") if p.strip()]
+    else:
+        cfg["plugins_required"] = cfg.get("plugins_required") or ["montecarlo"]
+
+    nm = cfg.get("night_mode") or {}
     cfg["night_mode"] = {
-        "enabled": "night_enabled" in data,
-        "start_hour": int(data.get("night_start", cfg["night_mode"]["start_hour"])),
-        "end_hour": int(data.get("night_end", cfg["night_mode"]["end_hour"])),
-        "cpu_pause_threshold": float(data.get("night_cpu", cfg["night_mode"]["cpu_pause_threshold"]))
+        "enabled": ("night_enabled" in data) if (request.form is not None and request.form != {}) else bool(data.get("night_mode", {}).get("enabled", nm.get("enabled", False))),
+        "start_hour": int(data.get("night_start", nm.get("start_hour", 23))),
+        "end_hour": int(data.get("night_end", nm.get("end_hour", 7))),
+        "cpu_pause_threshold": float(data.get("night_cpu", nm.get("cpu_pause_threshold", 70.0))),
     }
 
     machine_configs[machine_id] = cfg
@@ -706,11 +724,13 @@ def dashboard():
             .stop { background:#c0392b; color:white; border:none; padding:4px 8px; }
             .start { background:#27ae60; color:white; border:none; padding:4px 8px; }
             .cfg { font-size: 0.9em; }
+            .small { font-size: 0.85em; color:#333; }
+            input[type="text"] { padding: 3px; }
         </style>
     </head>
     <body>
 
-    <h2 style="color:red;">DASHBOARD V2 – CONFIG + JOBS (MIN-SEC)</h2>
+    <h2 style="color:red;">DASHBOARD V2 – CONFIG + JOBS (MIN-SEC + AUTO-PLUGINS)</h2>
 
     <h1>{{ app_name }} – Tableau de bord</h1>
     <p>
@@ -721,7 +741,8 @@ def dashboard():
     <p>
       <a href="/submit?token={{ token }}">➕ Nouveau job</a> |
       <a href="/jobs?token={{ token }}">📦 Jobs</a> |
-      <a href="/results?token={{ token }}">📊 Résultats</a>
+      <a href="/results?token={{ token }}">📊 Résultats</a> |
+      <a href="/plugins" target="_blank">🧩 Plugins</a>
     </p>
     <hr>
 
@@ -743,7 +764,10 @@ def dashboard():
         {% set nm = cfg.get("night_mode", {}) %}
         <tr>
           <td>{{ m.machine_id }}</td>
-          <td><strong>{{ m.display_name }}</strong></td>
+          <td>
+            <strong>{{ m.display_name }}</strong><br>
+            <span class="small">plugins_required: {{ (cfg.get('plugins_required') or ['montecarlo'])|join(',') }}</span>
+          </td>
           <td>{{ m.last_cpu }} %</td>
           <td>{{ m.total_seconds }}</td>
 
@@ -781,6 +805,12 @@ def dashboard():
               <input type="number" name="post_task_sleep_seconds"
                      value="{{ cfg.get('post_task_sleep_seconds',2) }}"
                      min="0" max="30"> s<br>
+
+              Plugins requis :
+              <input type="text" name="plugins_required"
+                     value="{{ (cfg.get('plugins_required') or ['montecarlo'])|join(',') }}"
+                     style="width: 220px;">
+              <br>
 
               <hr>
 
