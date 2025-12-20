@@ -713,142 +713,427 @@ def dashboard():
     <html lang="fr">
     <head>
         <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>{{ app_name }} - Dashboard</title>
         <style>
-            body { font-family: Arial, sans-serif; margin: 20px; }
-            table { border-collapse: collapse; width: 100%; max-width: 1200px; }
-            th, td { border: 1px solid #ccc; padding: 8px; vertical-align: top; }
-            th { background: #f0f0f0; }
-            tr:nth-child(even) { background: #fafafa; }
-            button { cursor: pointer; }
-            .stop { background:#c0392b; color:white; border:none; padding:4px 8px; }
-            .start { background:#27ae60; color:white; border:none; padding:4px 8px; }
-            .cfg { font-size: 0.9em; }
-            .small { font-size: 0.85em; color:#333; }
-            input[type="text"] { padding: 3px; }
+            :root[data-theme="light"]{
+              --bg:#f7f7f8; --card:#ffffff; --text:#111827; --muted:#6b7280; --line:#e5e7eb;
+              --pillOn:#e7f7ee; --pillIdle:#fff7e6; --pillOff:#f3f4f6;
+              --btn:#ffffff;
+            }
+            :root[data-theme="dark"]{
+              --bg:#0b1220; --card:#0f1a2c; --text:#e5e7eb; --muted:#93a4bf; --line:#1f2a3d;
+              --pillOn:#0f2b1b; --pillIdle:#2a2416; --pillOff:#1b2233;
+              --btn:#0f1a2c;
+            }
+            body{background:var(--bg); color:var(--text); font-family:system-ui,-apple-system,Segoe UI,Roboto; margin:0;}
+            .page{max-width:1200px; margin:0 auto; padding:22px;}
+            .topbar{display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:18px;}
+            h1{margin:0; font-size:20px;}
+            .sub{color:var(--muted); font-size:13px; margin-top:4px;}
+            .top-actions{display:flex; align-items:center; gap:10px;}
+            .hint{color:var(--muted); font-size:13px;}
+
+            .kpis{display:grid; grid-template-columns:repeat(5,1fr); gap:12px; margin-bottom:14px;}
+            .kpi{background:var(--card); border:1px solid var(--line); border-radius:14px; padding:12px;}
+            .kpi-title{color:var(--muted); font-size:12px;}
+            .kpi-value{font-size:18px; font-weight:650; margin-top:6px;}
+
+            .nav{display:flex; flex-wrap:wrap; gap:10px; margin:10px 0 12px;}
+            .chip{display:inline-flex; align-items:center; gap:8px; background:var(--card); border:1px solid var(--line);
+                 border-radius:999px; padding:8px 12px; color:var(--text); text-decoration:none; font-size:13px;}
+            .chip:hover{filter:brightness(1.05);}
+
+            .controls{display:flex; gap:10px; margin:12px 0 12px;}
+            .search, select{background:var(--card); color:var(--text); border:1px solid var(--line);
+                           border-radius:12px; padding:10px 12px;}
+            .search{flex:1;}
+
+            .grid{display:grid; grid-template-columns:repeat(12,1fr); gap:12px;}
+            .card{grid-column: span 12; background:var(--card); border:1px solid var(--line); border-radius:16px; overflow:hidden;}
+            .card-h{display:flex; justify-content:space-between; align-items:center; padding:12px 14px; border-bottom:1px solid var(--line);}
+            .card-h .title{font-weight:650;}
+            .card-b{padding:14px;}
+
+            table{width:100%; border-collapse:collapse;}
+            thead th{color:var(--muted); text-align:left; font-size:12px; font-weight:600; padding:12px; border-bottom:1px solid var(--line);}
+            tbody td{padding:12px; border-bottom:1px solid var(--line); vertical-align:top;}
+            tbody tr:hover{filter:brightness(1.05);}
+
+            .machineName{font-weight:650;}
+            .machineId{color:var(--muted); font-size:12px; margin-top:2px;}
+
+            .pill{display:inline-block; padding:6px 10px; border-radius:999px; font-size:12px; border:1px solid var(--line);}
+            .pill.on{background:var(--pillOn);}
+            .pill.idle{background:var(--pillIdle);}
+            .pill.off{background:var(--pillOff);}
+
+            .btn{background:var(--btn); color:var(--text); border:1px solid var(--line); border-radius:10px; padding:8px 10px; cursor:pointer;}
+            .btn:hover{filter:brightness(1.08);}
+            .btn.subtle{opacity:.85;}
+            .btnrow{display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap;}
+
+            .formgrid{display:grid; grid-template-columns:repeat(12,1fr); gap:10px;}
+            .f{grid-column: span 6;}
+            .f label{display:block; color:var(--muted); font-size:12px; margin-bottom:6px;}
+            .f input[type="text"], .f input[type="number"]{
+              width:100%; background:var(--card); color:var(--text); border:1px solid var(--line);
+              border-radius:10px; padding:9px 10px;
+            }
+            .fsmall{grid-column: span 4;}
+            .line{height:1px; background:var(--line); margin:12px 0;}
+            .check{display:flex; gap:10px; align-items:center; color:var(--text); margin:2px 0 10px;}
+            .check span{color:var(--muted); font-size:13px;}
+
+            .switch{position:relative; display:inline-block; width:44px; height:24px;}
+            .switch input{display:none;}
+            .slider{position:absolute; inset:0; background:var(--card); border:1px solid var(--line); border-radius:999px;}
+            .slider:before{content:""; position:absolute; height:18px; width:18px; left:3px; top:2.5px; background:var(--text);
+                          border-radius:50%; transition:.2s; opacity:.8;}
+            .switch input:checked + .slider:before{transform:translateX(20px);}
+
+            @media (max-width: 980px){
+              .kpis{grid-template-columns:repeat(2,1fr);}
+              thead{display:none;}
+              table, tbody, tr, td{display:block; width:100%;}
+              tbody td{border-bottom:none;}
+              tbody tr{border-bottom:1px solid var(--line); padding:10px;}
+              .f, .fsmall{grid-column: span 12;}
+            }
         </style>
     </head>
     <body>
+      <div class="page">
+        <header class="topbar">
+          <div>
+            <h1>{{ app_name }} — Dashboard</h1>
+            <div class="sub">Machines, capacité et configuration (admin)</div>
+          </div>
 
-    <h2 style="color:red;">DASHBOARD V2 – CONFIG + JOBS (MIN-SEC + AUTO-PLUGINS)</h2>
+          <div class="top-actions">
+            <label class="switch" title="Mode nuit interface">
+              <input id="darkToggle" type="checkbox">
+              <span class="slider"></span>
+            </label>
+            <span class="hint">Nuit</span>
+          </div>
+        </header>
 
-    <h1>{{ app_name }} – Tableau de bord</h1>
-    <p>
-      <strong>Machines :</strong> {{ machines|length }} |
-      <strong>Heures totales :</strong> {{ total_hours }}
-    </p>
+        <section class="kpis">
+          <div class="kpi">
+            <div class="kpi-title">Machines</div>
+            <div class="kpi-value">{{ machines|length }}</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-title">Heures cumulées</div>
+            <div class="kpi-value">{{ total_hours }}</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-title">Jobs</div>
+            <div class="kpi-value">{{ jobs_count }}</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-title">En ligne (estim.)</div>
+            <div class="kpi-value" id="kpiOnline">—</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-title">CPU moyen (estim.)</div>
+            <div class="kpi-value" id="kpiCpu">—</div>
+          </div>
+        </section>
 
-    <p>
-      <a href="/submit?token={{ token }}">➕ Nouveau job</a> |
-      <a href="/jobs?token={{ token }}">📦 Jobs</a> |
-      <a href="/results?token={{ token }}">📊 Résultats</a> |
-      <a href="/plugins" target="_blank">🧩 Plugins</a>
-    </p>
-    <hr>
+        <nav class="nav">
+          <a class="chip" href="/submit?token={{ token }}">➕ Nouveau job</a>
+          <a class="chip" href="/jobs?token={{ token }}">📦 Jobs</a>
+          <a class="chip" href="/results?token={{ token }}">📊 Résultats</a>
+          <a class="chip" href="/plugins" target="_blank">🧩 Plugins</a>
+          <a class="chip" href="/status" target="_blank">🔎 API /status</a>
+        </nav>
 
-    <table>
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>Nom</th>
-          <th>CPU</th>
-          <th>Secondes</th>
-          <th>Contrôle</th>
-          <th>Paramètres</th>
-          <th>Renommer</th>
-        </tr>
-      </thead>
-      <tbody>
-      {% for m in machines %}
-        {% set cfg = configs.get(m.machine_id, {}) %}
-        {% set nm = cfg.get("night_mode", {}) %}
-        <tr>
-          <td>{{ m.machine_id }}</td>
-          <td>
-            <strong>{{ m.display_name }}</strong><br>
-            <span class="small">plugins_required: {{ (cfg.get('plugins_required') or ['montecarlo'])|join(',') }}</span>
-          </td>
-          <td>{{ m.last_cpu }} %</td>
-          <td>{{ m.total_seconds }}</td>
+        <section class="controls">
+          <input id="search" class="search" placeholder="Rechercher une machine (nom, id)…" />
+          <select id="sort">
+            <option value="last_seen">Trier: Dernière activité</option>
+            <option value="last_cpu">Trier: CPU (faible → fort)</option>
+            <option value="total_seconds">Trier: Secondes cumulées</option>
+            <option value="name">Trier: Nom</option>
+          </select>
+        </section>
 
-          <td>
-            {% if cfg.get("enabled", True) %}
-              <form method="post" action="/machines/{{ m.machine_id }}/stop?token={{ token }}">
-                <button class="stop" type="submit">⏹ STOP</button>
-              </form>
-            {% else %}
-              <form method="post" action="/machines/{{ m.machine_id }}/start?token={{ token }}">
-                <button class="start" type="submit">▶ START</button>
-              </form>
-            {% endif %}
-          </td>
+        <section class="card">
+          <div class="card-h">
+            <div class="title">Machines</div>
+            <div class="hint">Statut: Offline si &gt; 3 min sans heartbeat</div>
+          </div>
 
-          <td class="cfg">
-            <form method="post" action="/machines/{{ m.machine_id }}/config?token={{ token }}">
-              <label>
-                <input type="checkbox" name="enabled"
-                  {% if cfg.get("enabled", True) %}checked{% endif %}>
-                Machine active
-              </label><br>
+          <div class="card-b" style="padding:0;">
+            <table>
+              <thead>
+                <tr>
+                  <th>Machine</th>
+                  <th>Statut</th>
+                  <th>CPU</th>
+                  <th>Dernière vue</th>
+                  <th>Secondes</th>
+                  <th style="text-align:right;">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="rows">
+              {% for m in machines %}
+                {% set cfg = configs.get(m.machine_id, {}) %}
+                {% set nm = cfg.get("night_mode", {}) %}
+                <tr class="row"
+                    data-name="{{ (m.display_name or '')|lower }}"
+                    data-id="{{ (m.machine_id or '')|lower }}"
+                    data-lastseen="{{ m.last_seen or '' }}"
+                    data-cpu="{{ m.last_cpu or 0 }}"
+                    data-seconds="{{ m.total_seconds or 0 }}">
+                  <td>
+                    <div class="machineName">{{ m.display_name }}</div>
+                    <div class="machineId">{{ m.machine_id }} — plugins_required: {{ (cfg.get('plugins_required') or ['montecarlo'])|join(',') }}</div>
+                  </td>
 
-              CPU max :
-              <input type="number" name="cpu_pause_threshold"
-                     value="{{ cfg.get('cpu_pause_threshold',50) }}"
-                     min="10" max="95" step="5"> %<br>
+                  <td>
+                    <span class="pill off" data-pill>—</span>
+                  </td>
 
-              Durée max tâche :
-              <input type="number" name="task_max_seconds"
-                     value="{{ cfg.get('task_max_seconds',30) }}"
-                     min="5" max="300"> s<br>
+                  <td>{{ m.last_cpu }}%</td>
 
-              Pause après tâche :
-              <input type="number" name="post_task_sleep_seconds"
-                     value="{{ cfg.get('post_task_sleep_seconds',2) }}"
-                     min="0" max="30"> s<br>
+                  <td>
+                    <span data-ago>—</span><br>
+                    <span class="hint" style="font-size:12px;">{{ m.last_seen }}</span>
+                  </td>
 
-              Plugins requis :
-              <input type="text" name="plugins_required"
-                     value="{{ (cfg.get('plugins_required') or ['montecarlo'])|join(',') }}"
-                     style="width: 220px;">
-              <br>
+                  <td>{{ m.total_seconds }}</td>
 
-              <hr>
+                  <td>
+                    <div class="btnrow">
+                      {% if cfg.get("enabled", True) %}
+                        <form method="post" action="/machines/{{ m.machine_id }}/stop?token={{ token }}">
+                          <button class="btn subtle" type="submit">Pause</button>
+                        </form>
+                      {% else %}
+                        <form method="post" action="/machines/{{ m.machine_id }}/start?token={{ token }}">
+                          <button class="btn" type="submit">Reprendre</button>
+                        </form>
+                      {% endif %}
 
-              <label>
-                <input type="checkbox" name="night_enabled"
-                  {% if nm.get("enabled") %}checked{% endif %}>
-                Mode nuit
-              </label><br>
+                      <button class="btn" type="button" onclick="toggleCfg('{{ m.machine_id }}')">Configurer</button>
+                    </div>
+                  </td>
+                </tr>
 
-              Nuit début :
-              <input type="number" name="night_start"
-                     value="{{ nm.get('start_hour',23) }}"
-                     min="0" max="23">
-              fin :
-              <input type="number" name="night_end"
-                     value="{{ nm.get('end_hour',7) }}"
-                     min="0" max="23"><br>
+                <tr id="cfg-{{ m.machine_id }}" style="display:none;">
+                  <td colspan="6">
+                    <div class="card" style="margin:10px 0;">
+                      <div class="card-h">
+                        <div class="title">Configuration — {{ m.display_name }}</div>
+                        <div class="hint">{{ m.machine_id }}</div>
+                      </div>
+                      <div class="card-b">
+                        <form method="post" action="/machines/{{ m.machine_id }}/config?token={{ token }}">
+                          <div class="check">
+                            <input type="checkbox" name="enabled" {% if cfg.get("enabled", True) %}checked{% endif %}>
+                            <span>Machine active</span>
+                          </div>
 
-              CPU nuit :
-              <input type="number" name="night_cpu"
-                     value="{{ nm.get('cpu_pause_threshold',70) }}"
-                     min="20" max="100" step="5"> %<br><br>
+                          <div class="formgrid">
+                            <div class="fsmall">
+                              <label>CPU max (%)</label>
+                              <input type="number" name="cpu_pause_threshold"
+                                     value="{{ cfg.get('cpu_pause_threshold',50) }}"
+                                     min="10" max="95" step="5">
+                            </div>
 
-              <button type="submit">Appliquer</button>
-            </form>
-          </td>
+                            <div class="fsmall">
+                              <label>Durée max tâche (s)</label>
+                              <input type="number" name="task_max_seconds"
+                                     value="{{ cfg.get('task_max_seconds',30) }}"
+                                     min="5" max="300">
+                            </div>
 
-          <td>
-            <form method="post" action="/machines/{{ m.machine_id }}/rename?token={{ token }}" style="display:flex; gap:6px;">
-              <input type="text" name="display_name" placeholder="Nouveau nom" required>
-              <button type="submit">OK</button>
-            </form>
-          </td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
+                            <div class="fsmall">
+                              <label>Pause après tâche (s)</label>
+                              <input type="number" name="post_task_sleep_seconds"
+                                     value="{{ cfg.get('post_task_sleep_seconds',2) }}"
+                                     min="0" max="30">
+                            </div>
 
+                            <div class="f">
+                              <label>Plugins requis (séparés par virgules)</label>
+                              <input type="text" name="plugins_required"
+                                     value="{{ (cfg.get('plugins_required') or ['montecarlo'])|join(',') }}">
+                            </div>
+                          </div>
+
+                          <div class="line"></div>
+
+                          <div class="check">
+                            <input type="checkbox" name="night_enabled" {% if nm.get("enabled") %}checked{% endif %}>
+                            <span>Mode nuit machine</span>
+                          </div>
+
+                          <div class="formgrid">
+                            <div class="fsmall">
+                              <label>Nuit début (0-23)</label>
+                              <input type="number" name="night_start"
+                                     value="{{ nm.get('start_hour',23) }}"
+                                     min="0" max="23">
+                            </div>
+                            <div class="fsmall">
+                              <label>Nuit fin (0-23)</label>
+                              <input type="number" name="night_end"
+                                     value="{{ nm.get('end_hour',7) }}"
+                                     min="0" max="23">
+                            </div>
+                            <div class="fsmall">
+                              <label>CPU nuit (%)</label>
+                              <input type="number" name="night_cpu"
+                                     value="{{ nm.get('cpu_pause_threshold',70) }}"
+                                     min="20" max="100" step="5">
+                            </div>
+                          </div>
+
+                          <div class="line"></div>
+
+                          <div class="formgrid">
+                            <div class="f">
+                              <label>Renommer</label>
+                              <div style="display:flex; gap:8px;">
+                                <input type="text" name="display_name" placeholder="Nouveau nom" form="rn-{{ m.machine_id }}" style="flex:1;">
+                                <button class="btn" type="submit">Appliquer config</button>
+                              </div>
+                            </div>
+                          </div>
+                        </form>
+
+                        <form id="rn-{{ m.machine_id }}" method="post" action="/machines/{{ m.machine_id }}/rename?token={{ token }}" style="display:none;"></form>
+                      </div>
+                    </div>
+                  </td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <script>
+        // Theme
+        const saved = localStorage.getItem("theme") || "dark";
+        document.documentElement.dataset.theme = saved;
+        const darkToggle = document.getElementById("darkToggle");
+        darkToggle.checked = (saved === "dark");
+        darkToggle.addEventListener("change", () => {
+          const t = darkToggle.checked ? "dark" : "light";
+          document.documentElement.dataset.theme = t;
+          localStorage.setItem("theme", t);
+        });
+
+        function timeAgo(iso) {
+          if (!iso) return "—";
+          const t = new Date(iso).getTime();
+          const s = Math.floor((Date.now() - t) / 1000);
+          if (s < 60) return `${s}s`;
+          const m = Math.floor(s/60);
+          if (m < 60) return `${m}min`;
+          const h = Math.floor(m/60);
+          if (h < 24) return `${h}h`;
+          const d = Math.floor(h/24);
+          return `${d}j`;
+        }
+
+        function computeStatus(lastSeenIso, cpu) {
+          if (!lastSeenIso) return {label:"Offline", cls:"off", age: 999999};
+          const ageSec = (Date.now() - new Date(lastSeenIso).getTime()) / 1000;
+          if (ageSec > 180) return {label:"Offline", cls:"off", age: ageSec};
+          if (Number(cpu) <= 10) return {label:"Idle", cls:"idle", age: ageSec};
+          return {label:"Online", cls:"on", age: ageSec};
+        }
+
+        function refreshDerived() {
+          const rows = Array.from(document.querySelectorAll("tr.row"));
+          let online = 0, cpuSum = 0, cpuCount = 0;
+
+          rows.forEach(r => {
+            const lastSeen = r.dataset.lastseen;
+            const cpu = Number(r.dataset.cpu || 0);
+            const st = computeStatus(lastSeen, cpu);
+
+            const pill = r.querySelector("[data-pill]");
+            pill.textContent = st.label;
+            pill.classList.remove("on","idle","off");
+            pill.classList.add(st.cls);
+
+            const ago = r.querySelector("[data-ago]");
+            ago.textContent = timeAgo(lastSeen);
+
+            if (st.cls !== "off") online += 1;
+            cpuSum += cpu; cpuCount += 1;
+          });
+
+          document.getElementById("kpiOnline").textContent = online;
+          document.getElementById("kpiCpu").textContent = cpuCount ? (cpuSum/cpuCount).toFixed(1) + "%" : "—";
+        }
+
+        function toggleCfg(machineId) {
+          const el = document.getElementById("cfg-" + machineId);
+          if (!el) return;
+          el.style.display = (el.style.display === "none") ? "" : "none";
+        }
+
+        // search + sort (client-side)
+        const search = document.getElementById("search");
+        const sort = document.getElementById("sort");
+        function applyFilterSort(){
+          const q = (search.value || "").toLowerCase().trim();
+          const rows = Array.from(document.querySelectorAll("tr.row"));
+          const cfgRows = rows.map(r => document.getElementById("cfg-" + r.querySelector(".machineId").textContent.split("—")[0].trim()));
+
+          rows.forEach(r => {
+            const name = r.dataset.name || "";
+            const id = r.dataset.id || "";
+            const show = !q || name.includes(q) || id.includes(q);
+            r.style.display = show ? "" : "none";
+            // cache aussi la ligne config associée
+            const mid = (r.dataset.id || "").toLowerCase();
+            const cfg = document.getElementById("cfg-" + r.querySelector(".machineId").textContent.split("—")[0].trim());
+            if (cfg && !show) cfg.style.display = "none";
+          });
+
+          const key = sort.value;
+          const parent = document.getElementById("rows");
+
+          const sortable = rows
+            .filter(r => r.style.display !== "none")
+            .map(r => {
+              const cfg = document.getElementById("cfg-" + r.children[0].querySelector(".machineId").textContent.split("—")[0].trim());
+              return {r, cfg};
+            });
+
+          sortable.sort((a,b) => {
+            if (key === "name") return (a.r.dataset.name||"").localeCompare(b.r.dataset.name||"");
+            if (key === "last_cpu") return Number(a.r.dataset.cpu||0) - Number(b.r.dataset.cpu||0);
+            if (key === "total_seconds") return Number(b.r.dataset.seconds||0) - Number(a.r.dataset.seconds||0);
+            // last_seen desc
+            return new Date(b.r.dataset.lastseen||0).getTime() - new Date(a.r.dataset.lastseen||0).getTime();
+          });
+
+          // reinsert in DOM in new order
+          sortable.forEach(({r,cfg}) => {
+            parent.appendChild(r);
+            if (cfg) parent.appendChild(cfg);
+          });
+        }
+
+        search.addEventListener("input", applyFilterSort);
+        sort.addEventListener("change", applyFilterSort);
+
+        refreshDerived();
+        applyFilterSort();
+        setInterval(refreshDerived, 4000);
+      </script>
     </body>
     </html>
     """
@@ -859,8 +1144,10 @@ def dashboard():
         machines=list(machines.values()),
         total_hours=total_hours,
         configs=machine_configs,
-        token=token
+        token=token,
+        jobs_count=len(jobs),
     )
+
 
 @app.route("/")
 def home():
