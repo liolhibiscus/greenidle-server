@@ -459,6 +459,11 @@ def set_machine_config(machine_id):
 
     data = request.form or request.json or {}
 
+    # ✅ rename (option B) : si un display_name est fourni, on le persiste
+    new_name = (data.get("display_name") or "").strip()
+    if new_name:
+        machines[machine_id]["display_name"] = new_name
+
     # enabled : checkbox HTML -> présent = True, absent = False
     if request.form is not None and request.form != {}:
         cfg["enabled"] = ("enabled" in data)
@@ -479,7 +484,7 @@ def set_machine_config(machine_id):
 
     nm = cfg.get("night_mode") or {}
     cfg["night_mode"] = {
-        "enabled": ("night_enabled" in data) if (request.form is not None and request.form != {}) else bool(data.get("night_mode", {}).get("enabled", nm.get("enabled", False))),
+        "enabled": ("night_enabled" in data) if (request.form is not None and request.form != {}) else bool(nm.get("enabled", False)),
         "start_hour": int(data.get("night_start", nm.get("start_hour", 23))),
         "end_hour": int(data.get("night_end", nm.get("end_hour", 7))),
         "cpu_pause_threshold": float(data.get("night_cpu", nm.get("cpu_pause_threshold", 70.0))),
@@ -1006,14 +1011,12 @@ def dashboard():
                             <div class="f">
                               <label>Renommer</label>
                               <div style="display:flex; gap:8px;">
-                                <input type="text" name="display_name" placeholder="Nouveau nom" form="rn-{{ m.machine_id }}" style="flex:1;">
+                                <input type="text" name="display_name" placeholder="Nouveau nom" style="flex:1;">
                                 <button class="btn" type="submit">Appliquer config</button>
                               </div>
                             </div>
                           </div>
                         </form>
-
-                        <form id="rn-{{ m.machine_id }}" method="post" action="/machines/{{ m.machine_id }}/rename?token={{ token }}" style="display:none;"></form>
                       </div>
                     </div>
                   </td>
