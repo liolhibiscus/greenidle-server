@@ -1,4 +1,4 @@
-print(">>> GREENIDLE_SERVER.PY LOADED – MIN-SEC V5 (AUTO-PLUGINS) + CLIENT-UPDATES V1 <<<")
+print(">>> GREENIDLE_SERVER.PY LOADED – MIN-SEC V5 (AUTO-PLUGINS) <<<")
 
 from flask import (
     Flask, request, jsonify, render_template_string, redirect, url_for,
@@ -14,18 +14,15 @@ from functools import wraps
 
 app = Flask(__name__)
 
+# ✅ Important sur Render (proxy)
 from werkzeug.middleware.proxy_fix import ProxyFix
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
 
 # =========================
-#   PATHS
-# =========================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# =========================
 #   PLUGINS (server_plugins/)
 # =========================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PLUGINS_DIR = os.path.join(BASE_DIR, "server_plugins")
 
 @app.route("/plugins/<path:filename>")
@@ -100,24 +97,6 @@ def plugins_page():
     return render_template_string(html, plugins=plugins)
 
 # =========================
-#   CLIENT RELEASES (releases/)
-# =========================
-RELEASES_DIR = os.path.join(BASE_DIR, "releases")
-
-@app.route("/releases/<path:filename>")
-def serve_release(filename):
-    # anti path traversal minimal
-    if ".." in filename or filename.startswith(("/", "\\")) or ":" in filename:
-        abort(400)
-
-    # autorise uniquement .exe ou .msi
-    lower = filename.lower()
-    if not (lower.endswith(".exe") or lower.endswith(".msi")):
-        abort(400)
-
-    return send_from_directory(RELEASES_DIR, filename, as_attachment=True)
-
-# =========================
 #   CONFIG
 # =========================
 APP_NAME = "GreenIdle"
@@ -138,18 +117,6 @@ tasks_log = []        # list[dict]
 # Auth clients minimal
 clients = {}            # client_id -> {"machine_key": "...", "created_at": "..."}
 machine_to_client = {}  # machine_id -> client_id
-
-# =========================
-#   UPDATE STATE (in-memory)
-# =========================
-update_state = {
-    "latest_version": "1.0.0",
-    "download_filename": "",   # ex: "GreenIdleClient-1.0.1.exe"
-    "sha256": "",              # sha256 of the exe
-    "update_allowed": False,   # kill-switch for 2B (manual allow)
-    "rollout_percent": 0,      # 0..100
-    "notes": ""
-}
 
 # =========================
 #   UTILS
@@ -467,42 +434,9 @@ def status():
         "machines": list(machines.values()),
     })
 
-# =========================
-#   VERSION (CLIENT UPDATE 2B) — URL ABSOLUE
-# =========================
-@app.route("/version", methods=["GET"])
-def version():
-    machine_id = request.args.get("machine_id")
-    if not machine_id:
-        return jsonify({"error": "machine_id manquant"}), 400
-
-    verify_client_if_present(machine_id)
-    ensure_machine(machine_id)
-    ensure_config(machine_id)
-
-    download_filename = (update_state.get("download_filename") or "").strip()
-
-    # ✅ URL absolue (ex: https://xxx.onrender.com/releases/GreenIdleClient-1.0.1.exe)
-    download_url = ""
-    if download_filename:
-        base = request.host_url.rstrip("/")  # inclut scheme + host
-        download_url = f"{base}/releases/{download_filename}"
-
-    payload = {
-        "latest_version": update_state.get("latest_version", "1.0.0"),
-        "download_url": download_url,
-        "sha256": update_state.get("sha256", ""),
-        "mandatory": False,
-        "update_allowed": bool(update_state.get("update_allowed", False)),
-        "rollout": {"percent": int(update_state.get("rollout_percent", 0))},
-        "notes": update_state.get("notes", ""),
-        "min_client_version": "1.0.0",
-    }
-    return jsonify(payload)
-
 
 # =========================
-#   ADMIN: RENAME + CONFIG + STOP/START + UPDATE
+#   ADMIN: RENAME + CONFIG + STOP/START
 # =========================
 @app.route("/machines/<machine_id>/rename", methods=["POST"])
 @require_admin_route
@@ -529,7 +463,6 @@ def set_machine_config(machine_id):
     if request.form is not None and request.form != {}:
         cfg["enabled"] = ("enabled" in data)
     else:
-        # si JSON (API) : true/false direct
         if "enabled" in data:
             cfg["enabled"] = bool(data.get("enabled"))
 
@@ -573,40 +506,6 @@ def start_machine(machine_id):
     machine_configs[machine_id] = cfg
     return redirect(url_for("dashboard", token=request.args.get("token")))
 
-# --- ADMIN UPDATE SETTINGS ---
-@app.route("/admin/update", methods=["POST"])
-@require_admin_route
-def admin_update_settings():
-    data = request.form or request.json or {}
-
-    latest_version = (data.get("latest_version") or "").strip()
-    download_filename = (data.get("download_filename") or "").strip()
-    sha256_hex = (data.get("sha256") or "").strip().lower()
-    notes = (data.get("notes") or "").strip()
-
-    # checkbox HTML
-    if request.form is not None and request.form != {}:
-        update_allowed = ("update_allowed" in data)
-    else:
-        update_allowed = bool(data.get("update_allowed", False))
-
-    try:
-        rollout_percent = int(data.get("rollout_percent", update_state.get("rollout_percent", 0)))
-    except Exception:
-        rollout_percent = int(update_state.get("rollout_percent", 0))
-
-    rollout_percent = max(0, min(100, rollout_percent))
-
-    # validations simples
-    if latest_version:
-        update_state["latest_version"] = latest_version
-    update_state["download_filename"] = download_filename
-    update_state["sha256"] = sha256_hex
-    update_state["update_allowed"] = bool(update_allowed)
-    update_state["rollout_percent"] = int(rollout_percent)
-    update_state["notes"] = notes
-
-    return redirect(url_for("dashboard", token=request.args.get("token")))
 
 # =========================
 #   JOBS (ADMIN) — MONTECARLO UNIQUEMENT
@@ -856,7 +755,6 @@ def dashboard():
                            border-radius:12px; padding:10px 12px;}
             .search{flex:1;}
 
-            .grid{display:grid; grid-template-columns:repeat(12,1fr); gap:12px;}
             .card{grid-column: span 12; background:var(--card); border:1px solid var(--line); border-radius:16px; overflow:hidden;}
             .card-h{display:flex; justify-content:space-between; align-items:center; padding:12px 14px; border-bottom:1px solid var(--line);}
             .card-h .title{font-weight:650;}
@@ -957,52 +855,6 @@ def dashboard():
           <a class="chip" href="/status" target="_blank">🔎 API /status</a>
         </nav>
 
-        <!-- ===== UPDATE SECTION ===== -->
-        <section class="card" style="margin-bottom:12px;">
-          <div class="card-h">
-            <div class="title">Mises à jour client (2B)</div>
-            <div class="hint">⚠️ Mémoire volatile (reset au redeploy)</div>
-          </div>
-          <div class="card-b">
-            <form method="post" action="/admin/update?token={{ token }}">
-              <div class="formgrid">
-                <div class="fsmall">
-                  <label>Latest version</label>
-                  <input type="text" name="latest_version" value="{{ update.latest_version }}">
-                </div>
-                <div class="f">
-                  <label>Fichier (.exe) dans releases/</label>
-                  <input type="text" name="download_filename" placeholder="GreenIdleClient-1.0.1.exe" value="{{ update.download_filename }}">
-                </div>
-                <div class="f">
-                  <label>SHA256 de l'exe</label>
-                  <input type="text" name="sha256" placeholder="hex sha256…" value="{{ update.sha256 }}">
-                </div>
-                <div class="fsmall">
-                  <label>Rollout % (0-100)</label>
-                  <input type="number" name="rollout_percent" min="0" max="100" value="{{ update.rollout_percent }}">
-                </div>
-                <div class="f">
-                  <label>Notes</label>
-                  <input type="text" name="notes" value="{{ update.notes }}">
-                </div>
-              </div>
-
-              <div class="line"></div>
-
-              <div class="check">
-                <input type="checkbox" name="update_allowed" {% if update.update_allowed %}checked{% endif %}>
-                <span>Autoriser update (kill-switch global). Si décoché, seul le rollout % peut déclencher.</span>
-              </div>
-
-              <button class="btn" type="submit">Enregistrer update</button>
-              <span class="hint" style="margin-left:10px;">
-                Endpoint client: <code>/version</code> — download: <code>/releases/&lt;file&gt;</code>
-              </span>
-            </form>
-          </div>
-        </section>
-
         <section class="controls">
           <input id="search" class="search" placeholder="Rechercher une machine (nom, id)…" />
           <select id="sort">
@@ -1036,6 +888,7 @@ def dashboard():
                 {% set cfg = configs.get(m.machine_id, {}) %}
                 {% set nm = cfg.get("night_mode", {}) %}
                 <tr class="row"
+                    data-machine="{{ m.machine_id }}"
                     data-name="{{ (m.display_name or '')|lower }}"
                     data-id="{{ (m.machine_id or '')|lower }}"
                     data-lastseen="{{ m.last_seen or '' }}"
@@ -1239,6 +1092,7 @@ def dashboard():
         // search + sort (client-side)
         const search = document.getElementById("search");
         const sort = document.getElementById("sort");
+
         function applyFilterSort(){
           const q = (search.value || "").toLowerCase().trim();
           const rows = Array.from(document.querySelectorAll("tr.row"));
@@ -1248,8 +1102,9 @@ def dashboard():
             const id = r.dataset.id || "";
             const show = !q || name.includes(q) || id.includes(q);
             r.style.display = show ? "" : "none";
-            // cache aussi la ligne config associée
-            const cfg = document.getElementById("cfg-" + (r.children[0].querySelector(".machineId").textContent.split("—")[0].trim()));
+
+            // cache aussi la ligne config associée (robuste)
+            const cfg = document.getElementById("cfg-" + r.dataset.machine);
             if (cfg && !show) cfg.style.display = "none";
           });
 
@@ -1259,8 +1114,7 @@ def dashboard():
           const sortable = rows
             .filter(r => r.style.display !== "none")
             .map(r => {
-              const mid = r.children[0].querySelector(".machineId").textContent.split("—")[0].trim();
-              const cfg = document.getElementById("cfg-" + mid);
+              const cfg = document.getElementById("cfg-" + r.dataset.machine);
               return {r, cfg};
             });
 
@@ -1297,7 +1151,6 @@ def dashboard():
         configs=machine_configs,
         token=token,
         jobs_count=len(jobs),
-        update=update_state
     )
 
 @app.route("/")
