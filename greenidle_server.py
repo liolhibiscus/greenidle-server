@@ -1,4 +1,4 @@
-print(">>> GREENIDLE_SERVER.PY LOADED – MIN-SEC V5 (AUTO-PLUGINS) <<<")
+print(">>> GREENIDLE_SERVER.PY LOADED – MIN-SEC V6 (AUTO-PLUGINS + MULTI-JOBS) <<<")
 
 from flask import (
     Flask, request, jsonify, render_template_string, redirect, url_for,
@@ -10,6 +10,7 @@ import os
 import time
 import hmac
 import hashlib
+import json
 from functools import wraps
 
 app = Flask(__name__)
@@ -61,6 +62,15 @@ def list_plugins():
     except Exception:
         pass
     return items
+
+def plugin_types_available():
+    """Returns list of plugin type names without .py, ex: ['montecarlo','optimizer_grid']"""
+    types = []
+    for p in list_plugins():
+        nm = (p.get("name") or "").strip()
+        if nm.endswith(".py"):
+            types.append(nm[:-3])
+    return types
 
 @app.route("/plugins.json")
 def plugins_json():
@@ -245,6 +255,26 @@ def ensure_config(machine_id: str):
 
     return cfg
 
+def json_or_none(s: str):
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        return json.loads(s)
+    except Exception:
+        return None
+
+def safe_int(x, default=0, min_value=None, max_value=None):
+    try:
+        v = int(x)
+    except Exception:
+        v = int(default)
+    if min_value is not None:
+        v = max(min_value, v)
+    if max_value is not None:
+        v = min(max_value, v)
+    return v
+
 # =========================
 #   API CLIENTS
 # =========================
@@ -349,8 +379,8 @@ def get_task():
 
             return jsonify({
                 "task_id": t["task_id"],
-                "payload": t["task_type"],
-                "params": t.get("params", {}),
+                "payload": t["task_type"],      # client support: payload=type
+                "params": t.get("params", {}),  # plugin.run(params)
                 "size": t.get("size", 0),
                 "task_max_seconds": cfg.get("task_max_seconds", 30),
                 "post_task_sleep_seconds": cfg.get("post_task_sleep_seconds", 2),
@@ -513,36 +543,24 @@ def start_machine(machine_id):
 
 
 # =========================
-#   JOBS (ADMIN) — MONTECARLO UNIQUEMENT
+#   JOBS (ADMIN) — MULTI PLUGINS
 # =========================
-@app.route("/submit", methods=["GET", "POST"])
-@require_admin_route
-def submit_job():
-    token = request.args.get("token")
+def create_tasks_for_job(job_id: str, task_type: str, total_chunks: int, size: int, params_json_text: str):
+    """
+    - montecarlo: uses size as n (per chunk) + seed=i+1 (compat with your old behavior),
+      and merges extra params from JSON if provided.
+    - optimizer_grid: expects params JSON describing a grid; generates 1 task per combination.
+      If JSON is not a grid, uses it as payload for all tasks.
+    - other plugins: uses params JSON as-is for every chunk.
+    """
+    extra = json_or_none(params_json_text)
 
-    if request.method == "POST":
-        name = request.form.get("name", "Job sans nom")
-        description = request.form.get("description", "")
-        task_type = "montecarlo"  # verrouillé
-        total_chunks = int(request.form.get("chunks", 5))
-        size = int(request.form.get("size", 200000))
-
-        job_id = str(uuid.uuid4())[:8]
-        jobs[job_id] = {
-            "job_id": job_id,
-            "name": name,
-            "description": description,
-            "task_type": task_type,
-            "total_chunks": total_chunks,
-            "created_at": now_iso(),
-            "status": "pending",
-            "total_seconds": 0
-        }
-
+    if task_type == "montecarlo":
         for i in range(total_chunks):
             task_id = f"{job_id}_part_{i+1}"
             params = {"n": size, "seed": i + 1}
-
+            if isinstance(extra, dict):
+                params.update(extra)
             tasks[task_id] = {
                 "task_id": task_id,
                 "job_id": job_id,
@@ -556,8 +574,173 @@ def submit_job():
                 "seconds": 0,
                 "result": None
             }
+        return
+
+    if task_type == "optimizer_grid":
+        # Expected JSON:
+        # {
+        #   "grid": {"alpha":[...], "beta":[...], "gamma":[...]},
+        #   "metric":"minimize_loss",
+        #   "seed":42
+        # }
+        # Plugin expects payload:
+        # {"params":{...}, "metric":..., "seed":...}
+        metric = "minimize_loss"
+        seed = 42
+        grid = None
+
+        if isinstance(extra, dict):
+            metric = (extra.get("metric") or metric)
+            seed = extra.get("seed", seed)
+            grid = extra.get("grid")
+
+        def cartesian_product(keys, lists):
+            out = [{}]
+            for k, vals in zip(keys, lists):
+                new_out = []
+                for base in out:
+                    for v in vals:
+                        d = dict(base)
+                        d[k] = v
+                        new_out.append(d)
+                out = new_out
+            return out
+
+        combos = []
+        if isinstance(grid, dict) and grid:
+            keys = []
+            lists = []
+            for k, vals in grid.items():
+                if isinstance(vals, list) and vals:
+                    keys.append(k)
+                    lists.append(vals)
+            if keys and lists:
+                combos = cartesian_product(keys, lists)
+
+        # If grid produced combos, override total_chunks to combos count.
+        if combos:
+            # Update job total_chunks to match actual combos count
+            jobs[job_id]["total_chunks"] = len(combos)
+            for i, combo in enumerate(combos, start=1):
+                task_id = f"{job_id}_cfg_{i}"
+                params = {
+                    "params": combo,
+                    "metric": metric,
+                    "seed": seed
+                }
+                tasks[task_id] = {
+                    "task_id": task_id,
+                    "job_id": job_id,
+                    "task_type": task_type,
+                    "size": 0,
+                    "params": params,
+                    "status": "pending",
+                    "assigned_to": None,
+                    "created_at": now_iso(),
+                    "updated_at": None,
+                    "seconds": 0,
+                    "result": None
+                }
+            return
+
+        # Fallback: no grid => behave like "generic" with total_chunks
+        for i in range(total_chunks):
+            task_id = f"{job_id}_part_{i+1}"
+            params = extra if isinstance(extra, dict) else {}
+            tasks[task_id] = {
+                "task_id": task_id,
+                "job_id": job_id,
+                "task_type": task_type,
+                "size": 0,
+                "params": params,
+                "status": "pending",
+                "assigned_to": None,
+                "created_at": now_iso(),
+                "updated_at": None,
+                "seconds": 0,
+                "result": None
+            }
+        return
+
+    # Generic plugins
+    for i in range(total_chunks):
+        task_id = f"{job_id}_part_{i+1}"
+        params = extra if isinstance(extra, dict) else {}
+        tasks[task_id] = {
+            "task_id": task_id,
+            "job_id": job_id,
+            "task_type": task_type,
+            "size": 0,
+            "params": params,
+            "status": "pending",
+            "assigned_to": None,
+            "created_at": now_iso(),
+            "updated_at": None,
+            "seconds": 0,
+            "result": None
+        }
+
+@app.route("/submit", methods=["GET", "POST"])
+@require_admin_route
+def submit_job():
+    token = request.args.get("token")
+    available = plugin_types_available()
+    if not available:
+        available = ["montecarlo"]  # safe fallback
+
+    if request.method == "POST":
+        name = (request.form.get("name") or "Job sans nom").strip()
+        description = (request.form.get("description") or "").strip()
+
+        task_type = (request.form.get("task_type") or "montecarlo").strip()
+        if task_type not in available:
+            # refuse unknown types to avoid typos
+            task_type = "montecarlo"
+
+        total_chunks = safe_int(request.form.get("chunks", 5), default=5, min_value=1, max_value=500)
+        size = safe_int(request.form.get("size", 200000), default=200000, min_value=0)
+        params_json_text = (request.form.get("params_json") or "").strip()
+
+        # quick JSON validation if provided
+        if params_json_text:
+            parsed = json_or_none(params_json_text)
+            if parsed is None:
+                return "Params JSON invalides (doit être un objet JSON).", 400
+            if not isinstance(parsed, dict):
+                return "Params JSON invalides (doit être un objet JSON).", 400
+
+        job_id = str(uuid.uuid4())[:8]
+        jobs[job_id] = {
+            "job_id": job_id,
+            "name": name,
+            "description": description,
+            "task_type": task_type,
+            "total_chunks": total_chunks,
+            "created_at": now_iso(),
+            "status": "pending",
+            "total_seconds": 0
+        }
+
+        create_tasks_for_job(
+            job_id=job_id,
+            task_type=task_type,
+            total_chunks=total_chunks,
+            size=size,
+            params_json_text=params_json_text
+        )
 
         return redirect(url_for("jobs_view", token=token))
+
+    # Defaults for UI
+    default_params_by_type = {
+        "montecarlo": "{}",
+        "optimizer_grid": json.dumps({
+            "grid": {"alpha": [0.1, 0.2, 0.3, 0.4], "beta": [1, 2, 3], "gamma": [10, 15, 20]},
+            "metric": "minimize_loss",
+            "seed": 42
+        }, indent=2),
+        "hello": "{}"
+    }
 
     html = """
     <h1>Soumettre un job GreenIdle</h1>
@@ -570,18 +753,70 @@ def submit_job():
         Description :<br>
         <textarea name="description" rows="3" cols="60">Test calcul distribué</textarea><br><br>
 
-        Type de tâche : <b>montecarlo</b> (unique)<br><br>
+        Type de tâche :<br>
+        <select name="task_type" id="task_type" onchange="onTypeChange()">
+          {% for t in available %}
+            <option value="{{ t }}" {% if t == "montecarlo" %}selected{% endif %}>{{ t }}</option>
+          {% endfor %}
+        </select>
+        <div style="color:#666; font-size:12px; margin-top:6px;">
+          Le type correspond au nom du plugin dans <code>server_plugins/</code> (sans .py).
+        </div>
+        <br>
 
         Chunks :<br>
-        <input name="chunks" type="number" value="5" min="1" max="200"><br><br>
+        <input name="chunks" id="chunks" type="number" value="5" min="1" max="500"><br><br>
 
-        Taille (n) :<br>
-        <input name="size" type="number" value="200000" min="1000"><br><br>
+        <div id="size_block">
+          Taille (n) (montecarlo) :<br>
+          <input name="size" id="size" type="number" value="200000" min="0"><br><br>
+        </div>
+
+        Params (JSON) :<br>
+        <textarea name="params_json" id="params_json" rows="10" cols="80" style="font-family: monospace;">{{ default_json }}</textarea><br>
+        <div style="color:#666; font-size:12px; margin-top:6px;">
+          <b>montecarlo</b> : JSON fusionné dans params (ex: {"idle":true})<br>
+          <b>optimizer_grid</b> : attend {"grid":{...}, "metric":"minimize_loss", "seed":42} et génère 1 tâche par combinaison.
+        </div>
+        <br>
 
         <button type="submit">Créer le job</button>
     </form>
+
+    <script>
+      const defaults = {{ defaults|safe }};
+      function onTypeChange(){
+        const t = document.getElementById("task_type").value;
+        const sizeBlock = document.getElementById("size_block");
+        const chunks = document.getElementById("chunks");
+        const params = document.getElementById("params_json");
+
+        if (t === "montecarlo") {
+          sizeBlock.style.display = "";
+          if (!chunks.value || chunks.value === "1") chunks.value = 5;
+          params.value = defaults["montecarlo"] || "{}";
+        } else if (t === "optimizer_grid") {
+          // size irrelevant; chunks will be overridden by grid size anyway
+          sizeBlock.style.display = "none";
+          chunks.value = 1;
+          params.value = defaults["optimizer_grid"] || "{}";
+        } else {
+          sizeBlock.style.display = "none";
+          if (!chunks.value) chunks.value = 5;
+          params.value = defaults[t] || "{}";
+        }
+      }
+      // initialize on load
+      onTypeChange();
+    </script>
     """
-    return render_template_string(html, token=token)
+    return render_template_string(
+        html,
+        token=token,
+        available=available,
+        default_json=default_params_by_type.get("montecarlo", "{}"),
+        defaults=json.dumps(default_params_by_type)
+    )
 
 @app.route("/jobs")
 @require_admin_route
@@ -622,22 +857,72 @@ def aggregate_job_result(job_id: str):
     job = jobs.get(job_id)
     if not job:
         return None
-    if job.get("task_type") != "montecarlo":
-        return None
 
-    inside_sum = 0
-    total_sum = 0
+    ttype = job.get("task_type")
+
+    if ttype == "montecarlo":
+        inside_sum = 0
+        total_sum = 0
+        for t in tasks.values():
+            if t["job_id"] == job_id and t.get("result"):
+                r = t["result"] or {}
+                inside_sum += int(r.get("inside", 0))
+                total_sum += int(r.get("total", 0))
+
+        if total_sum <= 0:
+            return {"type": "montecarlo", "pi": None, "inside": inside_sum, "total": total_sum}
+
+        pi_est = 4.0 * inside_sum / float(total_sum)
+        return {"type": "montecarlo", "pi": pi_est, "inside": inside_sum, "total": total_sum}
+
+    if ttype == "optimizer_grid":
+        best = None
+        tested = 0
+        for t in tasks.values():
+            if t["job_id"] != job_id:
+                continue
+            if t.get("status") != "done":
+                continue
+            r = t.get("result") or {}
+            if not isinstance(r, dict):
+                continue
+            tested += 1
+            score = r.get("score")
+            if score is None:
+                continue
+            try:
+                score = float(score)
+            except Exception:
+                continue
+
+            # metric: minimize_loss by default (lower is better); maximize_score => higher better
+            metric = (r.get("metric") or "minimize_loss").strip().lower()
+            better = False
+            if best is None:
+                better = True
+            else:
+                if metric == "maximize_score":
+                    better = score > float(best.get("score"))
+                else:
+                    better = score < float(best.get("score"))
+
+            if better:
+                best = {
+                    "score": score,
+                    "metric": metric,
+                    "tested_params": r.get("tested_params") or r.get("params") or r.get("tested") or r.get("tested_params")
+                }
+
+        return {"type": "optimizer_grid", "tested": tested, "best": best}
+
+    # Generic aggregation: count done + last result sample
+    done = 0
+    last = None
     for t in tasks.values():
-        if t["job_id"] == job_id and t.get("result"):
-            r = t["result"] or {}
-            inside_sum += int(r.get("inside", 0))
-            total_sum += int(r.get("total", 0))
-
-    if total_sum <= 0:
-        return {"pi": None, "inside": inside_sum, "total": total_sum}
-
-    pi_est = 4.0 * inside_sum / float(total_sum)
-    return {"pi": pi_est, "inside": inside_sum, "total": total_sum}
+        if t["job_id"] == job_id and t.get("status") == "done":
+            done += 1
+            last = t.get("result")
+    return {"type": ttype, "done": done, "sample_result": last}
 
 @app.route("/jobs/<job_id>")
 @require_admin_route
@@ -661,8 +946,22 @@ def job_detail(job_id):
 
     {% if agg %}
       <h2>Résultat agrégé</h2>
-      <p><b>PI estimé:</b> {{ agg.pi }}</p>
-      <p>inside={{ agg.inside }} / total={{ agg.total }}</p>
+
+      {% if agg.type == "montecarlo" %}
+        <p><b>PI estimé:</b> {{ agg.pi }}</p>
+        <p>inside={{ agg.inside }} / total={{ agg.total }}</p>
+      {% elif agg.type == "optimizer_grid" %}
+        <p><b>Configs testées:</b> {{ agg.tested }}</p>
+        {% if agg.best %}
+          <p><b>Meilleur score:</b> {{ agg.best.score }} (metric={{ agg.best.metric }})</p>
+          <p><b>Meilleurs paramètres:</b></p>
+          <pre style="margin:0; white-space:pre-wrap;">{{ agg.best.tested_params }}</pre>
+        {% else %}
+          <p>Aucun score agrégé pour l'instant.</p>
+        {% endif %}
+      {% else %}
+        <pre style="margin:0; white-space:pre-wrap;">{{ agg }}</pre>
+      {% endif %}
     {% endif %}
 
     <h2>Tâches</h2>

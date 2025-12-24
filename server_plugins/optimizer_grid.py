@@ -45,3 +45,14 @@ def run(payload: dict) -> dict:
         "score": round(score, 6),
         "seconds": max(1, int(elapsed))
     }
+
+{
+  "grid": {
+    "alpha": [0.1, 0.2, 0.3, 0.4],
+    "beta": [1, 2, 3],
+    "gamma": [10, 15, 20]
+  },
+  "metric": "minimize_loss",
+  "seed": 42
+}
+
